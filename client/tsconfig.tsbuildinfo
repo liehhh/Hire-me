@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/talkinghead.d.ts","./src/types.ts","./src/vite-env.d.ts","./src/components/avatarcontainer.tsx","./src/components/callroom.tsx","./src/components/feedbackdashboard.tsx","./src/components/setupform.tsx","./src/hooks/usespeechrecognition.ts"],"version":"5.9.3"}
