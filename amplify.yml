@@ -12,6 +12,8 @@ applications:
             # NEXT_PUBLIC_SERVER_URL (the Lambda Function URL) must be set as an
             # Amplify environment variable: Next.js inlines it at build time.
             - npm run build
+            # The webpack cache (~300 MB) would push the deploy over Amplify's 220 MB limit.
+            - rm -rf .next/cache
       artifacts:
         baseDirectory: .next
         files:
@@ -19,7 +21,6 @@ applications:
       cache:
         paths:
           - node_modules/**/*
-          - .next/cache/**/*
     # Same headers as next.config.mjs; they enable SharedArrayBuffer for the
     # multithreaded Kokoro voice model.
     customHeaders:
