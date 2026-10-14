@@ -11,9 +11,15 @@ const crossOriginIsolation = [
 const nextConfig = {
   // Dev double-mounting would start the avatar/TTS/mic pipeline twice.
   reactStrictMode: false,
-  async headers() {
-    return [{ source: "/:path*", headers: crossOriginIsolation }];
-  },
+  // Amplify serves a static export (the app has no server-side routes); the
+  // isolation headers are then set in amplify.yml. Locally, dev keeps headers().
+  ...(process.env.STATIC_EXPORT === "1"
+    ? { output: "export" }
+    : {
+        async headers() {
+          return [{ source: "/:path*", headers: crossOriginIsolation }];
+        },
+      }),
   // Everything heavy (transformers.js, Kokoro, TalkingHead) runs in the
   // browser only; stub the Node-specific halves of transformers.js.
   webpack(config) {

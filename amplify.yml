@@ -11,11 +11,9 @@ applications:
           commands:
             # NEXT_PUBLIC_SERVER_URL (the Lambda Function URL) must be set as an
             # Amplify environment variable: Next.js inlines it at build time.
-            - npm run build
-            # The webpack cache (~300 MB) would push the deploy over Amplify's 220 MB limit.
-            - rm -rf .next/cache
+            - STATIC_EXPORT=1 npm run build
       artifacts:
-        baseDirectory: .next
+        baseDirectory: out
         files:
           - "**/*"
       cache:
