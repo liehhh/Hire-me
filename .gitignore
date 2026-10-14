@@ -8,3 +8,7 @@ build/
 npm-debug.log*
 server/dist/
 client/dist/
+client/.next/
+next-env.d.ts
+server/lambda-dist/
+server/.aws-sam/

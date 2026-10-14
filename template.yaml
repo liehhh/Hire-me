@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: InterviewerAI backend - Lambda Function URL + DynamoDB (sessions, rate limits). Gemini key is read from SSM Parameter Store.
+
+Parameters:
+  ClientOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Browser origin allowed to call the API (your Amplify URL, e.g. https://main.xxxx.amplifyapp.com). No trailing slash.
+  GeminiApiKeyParameter:
+    Type: String
+    Default: /interviewerai/gemini-api-key
+    Description: Name of an existing SSM SecureString parameter that holds the Gemini API key (create it yourself; see README).
+  GeminiModel:
+    Type: String
+    Default: gemini-3.1-flash-lite
+  GeminiCallsPerDay:
+    Type: Number
+    Default: 300
+    MinValue: 0
+    Description: Whole-deployment daily cap on Gemini calls (an interview is roughly 15-40). 0 disables the cap. This is your protection against strangers spending your Gemini quota.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+
+Resources:
+  # One table for sessions and rate-limit counters. 5 RCU / 5 WCU provisioned
+  # stays inside DynamoDB's always-free allowance (25 RCU / 25 WCU, 25 GB).
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-api
+      RetentionInDays: 14
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ApiLogs
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-api
+      CodeUri: server/lambda-dist/
+      Handler: index.handler
+      MemorySize: 512
+      # /finish can take ~a minute (long Gemini report). Function URLs have no 30 s cap.
+      Timeout: 120
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref Table
+          GEMINI_API_KEY_PARAMETER: !Ref GeminiApiKeyParameter
+          GEMINI_MODEL: !Ref GeminiModel
+          GEMINI_RPD: !Ref GeminiCallsPerDay
+          NODE_OPTIONS: --enable-source-maps
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GeminiApiKeyParameter}
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: BUFFERED
+        Cors:
+          AllowOrigins: [!Ref ClientOrigin]
+          AllowMethods: [GET, POST]
+          AllowHeaders: [content-type]
+          MaxAge: 3600
+
+Outputs:
+  ApiUrl:
+    Description: Function URL. Set it as NEXT_PUBLIC_SERVER_URL in Amplify (drop the trailing slash).
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  TableName:
+    Value: !Ref Table

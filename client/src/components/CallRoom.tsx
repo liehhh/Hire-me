@@ -1,197 +1,136 @@
+"use client";
+
 import { useEffect, useRef, useState } from "react";
-import { io, Socket } from "socket.io-client";
-import { Mic, MicOff, PhoneOff, AlertTriangle, Video, VideoOff } from "lucide-react";
-import { AvatarContainer, type AvatarHandle, type SpeechAudio } from "./AvatarContainer";
-import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
-import type { InitInterviewResponse } from "../types";
-
-const SOCKET_URL = import.meta.env.VITE_SERVER_URL ?? "http://localhost:4001";
-
-// How long to wait after the candidate stops talking before treating their
-// utterance as "done" and sending it to the interviewer. Real speech has
-// natural pauses mid-thought; without this, every short pause would get
-// fired off as a separate (incomplete) answer.
-const SILENCE_BEFORE_SEND_MS = 1800;
-
-// Grace window right after the avatar starts talking where we ignore mic
-// input outright — this is when speaker bleed-in is most likely to trigger
-// a false "barge-in" before the echo-overlap check below even has a full
-// phrase to compare against.
-const BARGE_IN_GRACE_MS = 400;
-
-function normalizeWords(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-// Heuristic echo guard: since the mic stays live while the avatar talks (so
-// the candidate can genuinely interrupt), without headphones it can also
-// pick up the avatar's own voice from the speakers. If what was "heard"
-// overlaps heavily with what the avatar is currently saying, treat it as
-// self-echo rather than a real interruption.
-function looksLikeEcho(heard: string, aiText: string): boolean {
-  const heardWords = normalizeWords(heard);
-  if (heardWords.length === 0) return true;
-  const aiWords = new Set(normalizeWords(aiText));
-  const overlapCount = heardWords.filter((w) => aiWords.has(w)).length;
-  return overlapCount / heardWords.length >= 0.6;
-}
+import {
+  Mic,
+  MicOff,
+  PhoneOff,
+  AlertTriangle,
+  Video,
+  VideoOff,
+  Loader2,
+  RotateCcw,
+  Volume2,
+  Send,
+  Check,
+  CheckCircle2,
+  FileText,
+  Keyboard,
+} from "lucide-react";
+import { AvatarContainer } from "./AvatarContainer";
+import { humanize } from "./InterviewPrep";
+import type { AvatarSpeechAdapter } from "../features/avatar/AvatarSpeechAdapter";
+import { useConversation } from "../features/conversation/useConversation";
+import { LISTENING_STATES, type ConversationState } from "../features/conversation/conversationMachine";
+import type { AnalyzeResponse, TranscriptTurn } from "../types";
 
 interface CallRoomProps {
-  session: InitInterviewResponse;
-  onEndCall: () => void;
+  analysis: AnalyzeResponse;
+  onEnd: (sessionId: string, transcript: TranscriptTurn[]) => void;
 }
 
-interface CaptionEntry {
-  speaker: "interviewer" | "candidate";
-  text: string;
-}
+const formatClock = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
 
-export function CallRoom({ session, onEndCall }: CallRoomProps) {
-  const avatarRef = useRef<AvatarHandle>(null);
-  const socketRef = useRef<Socket | null>(null);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
-  const [caption, setCaption] = useState<CaptionEntry | null>(null);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+/** Whose turn it is, in the candidate's words. */
+const TURN_LABEL: Record<ConversationState, string> = {
+  idle: "Getting ready",
+  preparing: "Preparing the first question",
+  ai_speaking: "Interviewer is speaking",
+  waiting_for_candidate: "Your turn",
+  candidate_speaking: "Your turn",
+  candidate_finished: "Finishing your answer",
+  processing_answer: "Reviewing your answer",
+  ready_for_ai: "Interviewer is responding",
+  finished: "Interview complete",
+  error: "Paused",
+};
+
+const TURN_STYLE: Partial<Record<ConversationState, string>> = {
+  ai_speaking: "bg-white/90 text-black",
+  waiting_for_candidate: "bg-accent text-white",
+  candidate_speaking: "bg-accent text-white",
+  processing_answer: "bg-white/15 text-white",
+  ready_for_ai: "bg-white/15 text-white",
+  candidate_finished: "bg-white/15 text-white",
+  error: "bg-[#ff453a] text-white",
+};
+
+export function CallRoom({ analysis, onEnd }: CallRoomProps) {
+  const avatarRef = useRef<AvatarSpeechAdapter>(null);
+  const convo = useConversation({ analysis, avatar: avatarRef, onEnd });
+  const { state, tts, voice } = convo;
+
   const [micLevel, setMicLevel] = useState(0);
   const [isCameraOn, setIsCameraOn] = useState(false);
+  const [typedAnswer, setTypedAnswer] = useState("");
+  const [now, setNow] = useState(Date.now());
   const videoRef = useRef<HTMLVideoElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
 
-  const pendingUtteranceRef = useRef("");
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const currentAiTextRef = useRef("");
-  const avatarSpeechStartedAtRef = useRef(0);
+  const isListening = LISTENING_STATES.includes(state);
+  const hasSpeech = Boolean(convo.finalTranscript.trim() || convo.interimTranscript.trim());
 
-  const flushPendingUtterance = () => {
-    const text = pendingUtteranceRef.current.trim();
-    pendingUtteranceRef.current = "";
-    if (!text) return;
-    socketRef.current?.emit("candidate-speech-transcript", { text });
-  };
-
-  // Mic stays live even while the avatar is talking, so the candidate can
-  // genuinely interrupt mid-sentence like in a real conversation — pausing
-  // recognition during avatar speech would mean any barge-in gets ignored.
-  // (Trade-off: without headphones, the mic can pick up the avatar's own
-  // TTS output; the grace window + echo-overlap check below filter that
-  // out so the AI doesn't interrupt itself.)
-  const { isSupported, isListening, interimText } = useSpeechRecognition({
-    paused: isMuted,
-    onFinalTranscript: (text) => {
-      if (avatarRef.current?.isSpeaking()) {
-        const withinGrace = Date.now() - avatarSpeechStartedAtRef.current < BARGE_IN_GRACE_MS;
-        if (withinGrace || looksLikeEcho(text, currentAiTextRef.current)) {
-          return; // self-echo, not a real interruption — ignore entirely
-        }
-        avatarRef.current.interrupt();
-      }
-
-      pendingUtteranceRef.current = pendingUtteranceRef.current
-        ? `${pendingUtteranceRef.current} ${text}`
-        : text;
-      setCaption({ speaker: "candidate", text: pendingUtteranceRef.current });
-
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = setTimeout(flushPendingUtterance, SILENCE_BEFORE_SEND_MS);
-    },
-  });
-
+  // Recording clock while the candidate has the floor.
   useEffect(() => {
-    return () => {
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    };
-  }, []);
+    if (state !== "candidate_speaking") return;
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [state]);
 
-  // Socket.io lifecycle: connect once per call, tear down on unmount/end.
+  // Mic-level visualizer — only while the candidate's turn is open, so the
+  // meter never suggests the mic is live while the interviewer speaks.
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ["websocket"] });
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      socket.emit("start-interview", session.rubricId);
-    });
-
-    socket.on(
-      "ai-response-spoken",
-      ({ text, audio }: { text: string; audio?: SpeechAudio | null }) => {
-        setCaption({ speaker: "interviewer", text });
-        currentAiTextRef.current = text;
-        avatarRef.current?.speakText(text, audio);
-      }
-    );
-
-    socket.on("interview-error", ({ message }: { message: string }) => {
-      setConnectionError(message);
-    });
-
-    socket.on("connect_error", () => {
-      setConnectionError("Unable to reach the interview server.");
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, [session.rubricId]);
-
-  // Live mic-level visualizer: a lightweight WebAudio analyser, independent
-  // of speech recognition, purely for the waveform indicator.
-  useEffect(() => {
-    if (isMuted) {
+    if (!isListening) {
       setMicLevel(0);
       return;
     }
-
     let audioContext: AudioContext | null = null;
     let stream: MediaStream | null = null;
-    let rafId: number;
-    let analyser: AnalyserNode;
+    let rafId = 0;
+    let disposed = false;
 
-    async function setupMeter() {
+    (async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (disposed) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         audioContext = new AudioContext();
-        const source = audioContext.createMediaStreamSource(stream);
-        analyser = audioContext.createAnalyser();
+        const analyser = audioContext.createAnalyser();
         analyser.fftSize = 256;
-        source.connect(analyser);
-
+        audioContext.createMediaStreamSource(stream).connect(analyser);
         const data = new Uint8Array(analyser.frequencyBinCount);
         const tick = () => {
           analyser.getByteFrequencyData(data);
-          const avg = data.reduce((sum, v) => sum + v, 0) / data.length;
-          setMicLevel(avg / 255);
+          setMicLevel(data.reduce((sum, v) => sum + v, 0) / data.length / 255);
           rafId = requestAnimationFrame(tick);
         };
         tick();
-      } catch (err) {
-        console.warn("Microphone access unavailable for visualizer:", err);
+      } catch {
+        // Visualizer only — recognition reports real mic problems.
       }
-    }
-
-    setupMeter();
+    })();
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(rafId);
       stream?.getTracks().forEach((t) => t.stop());
-      audioContext?.close();
+      void audioContext?.close();
     };
-  }, [isMuted]);
+  }, [isListening]);
 
   // Local-only camera self-view. Nothing here is streamed to the server or
-  // the AI — it's purely a picture-in-picture preview, same as any video
-  // call UI, toggled independently of the microphone.
+  // the AI — it's purely a picture-in-picture preview.
   useEffect(() => {
     if (!isCameraOn) {
       cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
       cameraStreamRef.current = null;
       return;
     }
-
     let cancelled = false;
     navigator.mediaDevices
       .getUserMedia({ video: true })
@@ -203,140 +142,287 @@ export function CallRoom({ session, onEndCall }: CallRoomProps) {
         cameraStreamRef.current = stream;
         if (videoRef.current) videoRef.current.srcObject = stream;
       })
-      .catch((err) => {
-        console.warn("Camera access denied or unavailable:", err);
+      .catch(() => {
         if (!cancelled) setIsCameraOn(false);
       });
-
     return () => {
       cancelled = true;
     };
   }, [isCameraOn]);
 
-  useEffect(() => {
-    return () => {
-      cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
-    };
-  }, []);
+  useEffect(() => () => cameraStreamRef.current?.getTracks().forEach((t) => t.stop()), []);
 
-  const handleEndCall = () => {
-    socketRef.current?.disconnect();
-    onEndCall();
+  const submitTyped = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!typedAnswer.trim() || !isListening) return;
+    convo.submitTypedAnswer(typedAnswer);
+    setTypedAnswer("");
   };
 
+  const voiceStatus =
+    state === "ai_speaking" && tts.isLoadingModel
+      ? tts.progress !== null && tts.progress < 100
+        ? `Downloading voice model… ${tts.progress}%`
+        : "Preparing interviewer voice…"
+      : state === "ai_speaking" && !tts.isSpeaking
+        ? "Generating speech…"
+        : null;
+
+  const recordedMs = convo.answerStartedAt ? now - convo.answerStartedAt : 0;
+  const plan = analysis.interviewBlueprint;
+  const progress = convo.progress;
+  const totalEstimate = progress ? progress.questionsAsked + progress.estimatedQuestionsRemaining : 0;
+  const progressPct = progress && totalEstimate > 0 ? Math.min(100, (progress.questionsAsked / totalEstimate) * 100) : 0;
+  const elapsedMin = progress?.elapsedMinutes ?? 0;
+
+  // What the candidate sees in the transcript area.
+  const showCandidateText = isListening || state === "candidate_finished";
+  const liveText = `${convo.finalTranscript}${convo.interimTranscript ? ` ${convo.interimTranscript}` : ""}`.trim();
+
+  const banner = "flex flex-wrap items-center gap-3 rounded-2xl px-5 py-3 text-[15px] glass";
+  const bannerBtn = "flex shrink-0 items-center gap-1.5 rounded-full bg-white/15 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-white/25";
+
   return (
-    <div className="flex h-full w-full flex-col gap-4 p-4">
-      {connectionError && (
-        <div className="flex items-center gap-2 rounded-lg bg-red-950/60 px-4 py-2 text-sm text-red-300">
+    <div className="flex h-dvh w-full flex-col gap-3 bg-black p-3 text-white sm:p-4">
+      {convo.error && (
+        <div role="alert" className={`${banner} !bg-red-500/20 text-red-100`}>
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          {connectionError}
+          <span className="flex-1">{convo.error.message}</span>
+          {convo.error.canRetry && (
+            <button onClick={convo.retry} className={bannerBtn}>
+              <RotateCcw className="h-3.5 w-3.5" />
+              {convo.error.kind === "respond"
+                ? "Retry interviewer response"
+                : convo.error.kind === "speech"
+                  ? "Retry voice"
+                  : "Retry"}
+            </button>
+          )}
+          {convo.error.kind === "speech" && (
+            <button onClick={convo.continueWithoutVoice} className={bannerBtn}>
+              <Keyboard className="h-3.5 w-3.5" /> Continue in text mode
+            </button>
+          )}
+          <button onClick={convo.endInterview} className={bannerBtn}>
+            End &amp; get report
+          </button>
         </div>
       )}
 
-      {!isSupported && (
-        <div className="flex items-center gap-2 rounded-lg bg-amber-950/60 px-4 py-2 text-sm text-amber-300">
+      {voice.engine === "whisper" && voice.modelStatus === "loading" && (
+        <div className={`${banner} text-amber-200`}>
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          Your browser doesn't support Web Speech API voice input. Try Chrome or Edge for
-          the full voice experience.
+          Your browser doesn't support the Web Speech API — loading an on-device speech recognition model as a
+          fallback (one-time download, runs fully offline afterward).
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 gap-4">
-        <div className="relative flex-1">
-          <AvatarContainer
-            ref={avatarRef}
-            onSpeakingChange={(speaking) => {
-              if (speaking) avatarSpeechStartedAtRef.current = Date.now();
-              setIsAvatarSpeaking(speaking);
-            }}
-          />
+      {tts.needsAudioUnlock && (
+        <div className={`${banner} text-amber-200`}>
+          <Volume2 className="h-4 w-4 shrink-0" />
+          <span className="flex-1">Your browser blocked audio playback for the interviewer.</span>
+          <button onClick={() => void tts.enableAudio()} className={bannerBtn}>
+            Enable interviewer audio
+          </button>
+        </div>
+      )}
 
-          {/* Self-view camera thumbnail, picture-in-picture style */}
+      {(convo.micError || !voice.isSupported) && isListening && (
+        <div className={`${banner} text-amber-200`}>
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          {convo.micError ?? "Voice input isn't available in this browser — type your answer below."}
+        </div>
+      )}
+
+      <div className="flex min-h-0 flex-1 gap-3 sm:gap-4">
+        <div className="relative min-w-0 flex-1">
+          <AvatarContainer ref={avatarRef} />
+
+          <div className="absolute left-5 top-5 flex flex-col items-start gap-2">
+            <span
+              className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-sm font-medium backdrop-blur-2xl ${
+                TURN_STYLE[state] ?? "bg-white/10 text-white/70"
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full bg-current ${state === "ai_speaking" || state === "candidate_speaking" ? "animate-pulse" : ""}`} />
+              {TURN_LABEL[state]}
+            </span>
+            {(voiceStatus || state === "preparing" || state === "processing_answer" || state === "ready_for_ai") && (
+              <span className="flex items-center gap-2 rounded-full bg-black/40 px-4 py-1.5 text-sm text-white/70 backdrop-blur-2xl">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {voiceStatus ??
+                  (state === "preparing"
+                    ? "Interviewer is preparing…"
+                    : state === "processing_answer"
+                      ? "Reviewing your answer…"
+                      : "Preparing the response…")}
+              </span>
+            )}
+          </div>
+
           {isCameraOn && (
             <video
               ref={videoRef}
               autoPlay
               muted
               playsInline
-              className="absolute bottom-3 right-3 h-32 w-44 rounded-lg border border-slate-700 bg-slate-800 object-cover shadow-lg"
+              className="absolute right-5 top-5 h-32 w-44 rounded-2xl bg-neutral-900 object-cover shadow-2xl ring-1 ring-white/20"
             />
           )}
+
+          {/* The question, set large like a caption — the answer is always tied to this exact question. */}
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 rounded-b-[32px] bg-gradient-to-t from-black/85 via-black/50 to-transparent px-6 pb-6 pt-24 sm:px-10 sm:pb-8">
+            <p className="mb-2 text-sm font-medium text-white/50">{convo.persona?.name ?? "Interviewer"}</p>
+            <p className="max-w-4xl text-[clamp(1.25rem,2.6vw,2.25rem)] font-semibold leading-tight tracking-tight">
+              {convo.interviewerLine || <span className="text-white/30">…</span>}
+            </p>
+          </div>
         </div>
 
-        <aside className="flex w-64 shrink-0 flex-col gap-3 rounded-xl bg-slate-900 p-4 text-slate-200">
+        <aside className="hidden w-72 shrink-0 flex-col gap-7 overflow-y-auto rounded-[32px] bg-[#1c1c1e] p-7 lg:flex">
           <div>
-            <p className="text-xs uppercase tracking-wide text-slate-500">Interviewer</p>
-            <p className="font-semibold">{session.interviewerPersona.name}</p>
-            <p className="text-sm text-slate-400">{session.interviewerPersona.title}</p>
+            <p className="text-sm text-white/40">Interviewer</p>
+            <p className="mt-1 text-2xl font-semibold tracking-tight">{convo.persona?.name ?? "…"}</p>
+            <p className="text-[15px] text-white/50">{analysis.jobProfile.normalizedTitle}</p>
           </div>
           <div>
-            <p className="text-xs uppercase tracking-wide text-slate-500">Level</p>
-            <p className="text-sm text-slate-400">{session.seniorityLevel}</p>
+            <p className="text-5xl font-semibold tracking-[-0.04em] tabular-nums">
+              {progress?.questionsAsked ?? 0}
+              {totalEstimate > 0 && <span className="text-2xl text-white/30"> / ~{totalEstimate}</span>}
+            </p>
+            <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10">
+              <div className="h-full rounded-full bg-white transition-all" style={{ width: `${progressPct}%` }} />
+            </div>
+            <p className="mt-2 text-sm text-white/40">
+              {elapsedMin} / ~{plan.estimatedDurationMinutes} min
+            </p>
           </div>
           <div>
-            <p className="text-xs uppercase tracking-wide text-slate-500">Evaluating</p>
-            <ul className="mt-1 space-y-1 text-sm text-slate-400">
-              {session.keyCompetencies.map((c) => (
-                <li key={c}>• {c}</li>
-              ))}
+            <p className="text-sm text-white/40">Stage</p>
+            <p className="mt-0.5 text-[17px]">{progress ? humanize(progress.currentStage) : "—"}</p>
+          </div>
+          <div>
+            <p className="text-sm text-white/40">Current focus</p>
+            <p className="mt-0.5 text-[17px]">{convo.question?.competency ?? "—"}</p>
+            {convo.question?.isFollowUp && <p className="text-sm text-white/40">Follow-up</p>}
+          </div>
+          <div>
+            <p className="mb-2 text-sm text-white/40">Competencies</p>
+            <ul className="space-y-1.5 text-[15px]">
+              {plan.competencyWeights.map((c) => {
+                const covered = progress?.competenciesCovered.includes(c.competency);
+                return (
+                  <li key={c.competency} className={`flex items-center gap-2 ${covered ? "text-white" : "text-white/35"}`}>
+                    {covered ? <Check className="h-4 w-4 text-[#30d158]" /> : <span className="h-4 w-4" />}
+                    {c.competency}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </aside>
       </div>
 
-      {/* Closed-caption bar */}
-      <div className="min-h-[3.5rem] rounded-lg bg-slate-900/80 px-4 py-3 text-center text-sm text-slate-200">
-        {caption ? (
-          <span>
-            <span className="font-semibold text-slate-400">
-              {caption.speaker === "interviewer" ? session.interviewerPersona.name : "You"}:
-            </span>{" "}
-            {caption.text}
-          </span>
-        ) : interimText ? (
-          <span className="text-slate-500 italic">{interimText}</span>
-        ) : (
-          <span className="text-slate-600">Listening...</span>
-        )}
-      </div>
-
-      {/* Controls */}
-      <div className="flex items-center justify-center gap-4">
-        <div className="flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2">
-          <div className="flex h-6 w-24 items-end gap-0.5">
-            {Array.from({ length: 12 }).map((_, i) => {
-              const barThreshold = i / 12;
-              const active = !isMuted && micLevel > barThreshold;
-              return (
-                <div
-                  key={i}
-                  className={`w-1 flex-1 rounded-sm transition-all ${
-                    active ? "bg-emerald-400" : "bg-slate-700"
-                  }`}
-                  style={{ height: active ? `${30 + barThreshold * 70}%` : "20%" }}
-                />
-              );
-            })}
+      {/* Control bar: [mic status] [live transcript] [Done speaking] */}
+      <div className="flex flex-col gap-3 rounded-[28px] bg-[#1c1c1e] p-3 md:flex-row md:items-center">
+        <div className="flex w-full shrink-0 items-center gap-3 pl-1 md:w-56">
+          <div
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${
+              isListening ? "bg-accent text-white" : "bg-white/10 text-white/40"
+            }`}
+          >
+            {isListening ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
           </div>
-          <span className="text-xs text-slate-500">
-            {isListening ? "live" : isMuted ? "muted" : "idle"}
-          </span>
+          <div className="min-w-0">
+            <p className="text-[15px] font-medium">
+              {state === "candidate_speaking"
+                ? `Recording ${formatClock(recordedMs)}`
+                : state === "waiting_for_candidate"
+                  ? "Microphone on"
+                  : "Microphone off"}
+            </p>
+            <p className="text-xs text-white/40">
+              {state === "candidate_speaking"
+                ? "Take as long as you need"
+                : state === "waiting_for_candidate"
+                  ? "Speak as long as you need"
+                  : state === "processing_answer"
+                    ? "Answer submitted"
+                    : "Wait for your turn"}
+            </p>
+            {isListening && (
+              <div className="mt-1.5 flex h-1.5 w-24 items-end gap-0.5">
+                {Array.from({ length: 12 }).map((_, i) => (
+                  <div key={i} className={`h-full flex-1 rounded-full ${micLevel > i / 12 ? "bg-accent" : "bg-white/15"}`} />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="min-h-[3.25rem] max-h-32 flex-1 overflow-y-auto rounded-2xl bg-black/50 px-4 py-3 text-[15px] leading-relaxed">
+          {state === "processing_answer" || state === "ready_for_ai" ? (
+            <p className="text-white/80">
+              <CheckCircle2 className="mr-1.5 inline h-4 w-4 text-[#30d158]" />
+              <span className="text-white/40">Submitted: </span>
+              {convo.lockedAnswer}
+            </p>
+          ) : convo.error?.kind === "respond" && convo.lockedAnswer ? (
+            <p className="text-white/80">
+              <span className="text-white/40">Saved answer: </span>
+              {convo.lockedAnswer}
+            </p>
+          ) : showCandidateText && liveText ? (
+            <p>
+              {convo.finalTranscript}
+              {convo.interimTranscript && <span className="text-white/40"> {convo.interimTranscript}</span>}
+            </p>
+          ) : (
+            <p className="text-white/40">
+              {convo.notice ??
+                (isListening
+                  ? "Your turn — speak as long as you need, then click Done speaking."
+                  : state === "ai_speaking"
+                    ? "Listen to the question. Your microphone opens when the interviewer finishes."
+                    : "")}
+            </p>
+          )}
+          {convo.notice && liveText && <p className="mt-1 text-xs text-amber-300">{convo.notice}</p>}
         </div>
 
         <button
-          onClick={() => setIsMuted((m) => !m)}
-          className={`flex h-12 w-12 items-center justify-center rounded-full transition-colors ${
-            isMuted ? "bg-slate-700 text-slate-300" : "bg-emerald-600 text-white"
-          }`}
-          aria-label={isMuted ? "Unmute microphone" : "Mute microphone"}
+          onClick={convo.finishAnswer}
+          disabled={state !== "candidate_speaking" || !hasSpeech}
+          className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-full bg-accent px-7 text-[15px] font-medium text-white transition hover:bg-[#0077ed] active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
         >
-          {isMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+          <Check className="h-4 w-4" /> Done speaking
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-center gap-3 pb-1">
+        <form onSubmit={submitTyped} className="flex min-w-0 max-w-xl flex-1 gap-2">
+          <input
+            value={typedAnswer}
+            onChange={(e) => setTypedAnswer(e.target.value)}
+            disabled={!isListening}
+            placeholder={isListening ? "Or type your answer…" : "Typing opens on your turn"}
+            maxLength={60_000}
+            className="min-w-0 flex-1 rounded-full bg-[#1c1c1e] px-5 py-3 text-[15px] text-white outline-none transition placeholder:text-white/30 focus:ring-2 focus:ring-accent disabled:opacity-40"
+          />
+          <button
+            type="submit"
+            disabled={!typedAnswer.trim() || !isListening}
+            className="flex h-12 w-12 items-center justify-center rounded-full bg-[#1c1c1e] text-white transition hover:bg-white/15 disabled:opacity-30"
+            aria-label="Submit typed answer"
+          >
+            <Send className="h-4 w-4" />
+          </button>
+        </form>
 
         <button
           onClick={() => setIsCameraOn((c) => !c)}
-          className={`flex h-12 w-12 items-center justify-center rounded-full transition-colors ${
-            isCameraOn ? "bg-emerald-600 text-white" : "bg-slate-700 text-slate-300"
+          className={`flex h-12 w-12 items-center justify-center rounded-full transition ${
+            isCameraOn ? "bg-white text-black" : "bg-[#1c1c1e] text-white hover:bg-white/15"
           }`}
           aria-label={isCameraOn ? "Turn camera off" : "Turn camera on"}
         >
@@ -344,11 +430,14 @@ export function CallRoom({ session, onEndCall }: CallRoomProps) {
         </button>
 
         <button
-          onClick={handleEndCall}
-          className="flex h-12 w-12 items-center justify-center rounded-full bg-red-600 text-white transition-colors hover:bg-red-500"
-          aria-label="End call"
+          onClick={convo.endInterview}
+          className={`flex h-12 items-center gap-2 rounded-full px-6 text-[15px] font-medium text-white transition active:scale-[0.98] ${
+            state === "finished" ? "bg-accent hover:bg-[#0077ed]" : "bg-[#ff453a] hover:bg-[#ff5c52]"
+          }`}
+          aria-label="End interview"
         >
-          <PhoneOff className="h-5 w-5" />
+          {state === "finished" ? <FileText className="h-4 w-4" /> : <PhoneOff className="h-4 w-4" />}
+          End interview
         </button>
       </div>
     </div>

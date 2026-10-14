@@ -1,16 +1,14 @@
 # InterviewerAI
 
-Paste a job description (and optional resume), talk to a lip-synced 3D avatar
-interviewer in a live call room, and get a scored feedback report when you
-end the call.
+Paste a job description (and optionally your resume). You get an interview
+planned for that exact role and seniority, held by a lip-synced 3D avatar,
+followed by a report based only on what you actually said.
 
-## Stack
-
-- **Client**: React + Vite + TypeScript, Tailwind CSS, Lucide icons,
-  `@met4citizen/talkinghead` for the 3D avatar, `socket.io-client`, and the
-  browser's native Web Speech API for voice-to-text and TTS lip-sync.
-- **Server**: Node + Express + TypeScript, `socket.io`, `@google/genai`
-  (Gemini 2.5 Flash). Sessions live in an in-memory `Map` for the MVP.
+```text
+Next.js (React) ──HTTP──▶ Node/Express ──▶ Gemini (server-side only)
+   │
+   └─ Kokoro TTS (in-browser Web Worker) ──▶ TalkingHead avatar lip-sync
+```
 
 ## Setup
 
@@ -18,47 +16,114 @@ end the call.
 
 ```bash
 cd server
-cp .env.example .env     # then paste your Gemini API key into .env
+cp .env.example .env     # paste your GEMINI_API_KEY and set GEMINI_MODEL
 npm install
-npm run dev               # http://localhost:4000
+npm run dev               # http://localhost:4001
 ```
 
-`server/.env` is git-ignored — your `GEMINI_API_KEY` never gets committed.
-Get a key from https://aistudio.google.com/apikey if you don't have one.
+`GEMINI_MODEL` must be a model your key can generate with. Older models such
+as `gemini-2.5-flash` return 404 for newly created keys; the server sends one
+1-token request at startup and exits with a clear message if the model is
+unavailable (disable with `GEMINI_STARTUP_CHECK=false`). Get a key at
+https://aistudio.google.com/apikey.
 
 ### 2. Client
 
 ```bash
 cd client
 npm install
-npm run dev               # http://localhost:5173
+npm run dev               # Next.js on http://localhost:5173
 ```
 
-Open http://localhost:5173, paste a job description, and launch the call
-room. Voice input requires a Chromium-based browser (Chrome/Edge) for Web
-Speech API support; other browsers fall back to captions-only interaction.
+Voice input uses the Web Speech API (Chrome/Edge) with an on-device Whisper
+fallback; you can also type answers. The interviewer voice is Kokoro, generated
+locally in the browser — the first interview downloads the voice model once.
+
+### Tests
+
+```bash
+cd server && npm test      # Gemini client, flow rules, report validation
+cd client && npm test      # Kokoro TTS pipeline
+```
+
+## API
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/interview/analyze` | Job profile, CV profile, interview blueprint (2–3 Gemini calls) |
+| `POST /api/interview/start` | Opening line + first question (1 call, idempotent) |
+| `POST /api/interview/respond` | Evaluate the final answer + next question (1 call, idempotent per answer) |
+| `POST /api/interview/finish` | Validated report (1 call; never regenerated without `retry: true`) |
+
+Request/response types live in `shared/interviewTypes.ts` and are used by both
+packages.
 
 ## Project layout
 
 ```
-server/
-  src/
-    server.ts            Express app + Socket.io call loop
-    services/gemini.ts    All Gemini prompts/schemas
-    types.ts
-client/
-  src/
-    App.tsx               View router: setup -> call -> feedback
-    components/
-      SetupForm.tsx        View A: JD/resume intake
-      CallRoom.tsx          View B: live call room
-      AvatarContainer.tsx   3D avatar (TalkingHead) wrapper
-      FeedbackDashboard.tsx View C: scored report
-    hooks/useSpeechRecognition.ts
+shared/interviewTypes.ts        API contract (types only)
+server/src/
+  server.ts                     Express app, startup model check
+  config.ts                     Env + hard limits (LIMITS)
+  routes/interview.ts           Routes + error mapping
+  interview/
+    interviewService.ts         analyze / start / respond / finish orchestration
+    flow.ts                     Pacing rules, follow-up caps, evidence ledger
+    blueprint.ts                Duration/difficulty/weight normalisation
+    report.ts                   Report validation pass (quotes, scores, placeholders)
+    session.ts                  In-memory session store with TTL
+    inputSchemas.ts             Request validation (Zod)
+  services/
+    rateLimiter.ts              Global Gemini budget + per-IP HTTP limit
+    gemini/                     Client, prompts, Zod schemas, error mapping
+client/src/
+  App.tsx                       setup → plan → call → report
+  api/interviewApi.ts           Typed backend client
+  components/                   SetupForm, InterviewPrep, CallRoom, FeedbackDashboard
+  features/tts/                 Kokoro TTS (worker, playback, visemes)
+  features/avatar/              Avatar lip-sync adapter
 ```
 
 ## Before pushing to GitHub
 
-`server/.env` is already in `.gitignore`. Double-check with
-`git status` before your first commit that it isn't staged, and never commit
-a real API key in `.env.example`.
+`server/.env` is git-ignored. Check `git status` before committing and never
+put a real API key in `.env.example`.
+
+## Deploying to AWS (Amplify + Lambda + DynamoDB)
+
+```
+Browser ─▶ Amplify Hosting (Next.js client)
+   │
+   └─HTTPS─▶ Lambda Function URL ─▶ Gemini
+                  ├─▶ DynamoDB   (sessions + rate-limit counters, TTL)
+                  └─▶ SSM Parameter Store (Gemini API key)
+```
+
+Locally nothing changes (Express server + in-memory sessions). In AWS each
+request runs on whichever Lambda instance is free, so `server/src/lambda/app.ts`
+loads the session from DynamoDB, runs the same `InterviewService`, and saves it
+back (optimistic locking, items expire via TTL). The Function URL has no
+30-second cap, so the ~1 minute report in `/finish` works as-is.
+
+**One-time setup** (needs the AWS CLI and SAM CLI, signed in to your account):
+
+```bash
+# 1. Budget alert first: AWS console > Billing > Budgets > e.g. $5/month.
+
+# 2. Store the Gemini key (SecureString on the default key is free).
+aws ssm put-parameter --name /interviewerai/gemini-api-key --type SecureString --value "<your key>"
+
+# 3. Build and deploy the backend.
+cd server && npm run build:lambda && cd ..
+sam deploy --guided        # accept defaults; note the ApiUrl output
+```
+
+Then in the Amplify console: *Host web app* > connect this repo > Amplify
+detects `amplify.yml` (app root `client`). Add the environment variable
+`NEXT_PUBLIC_SERVER_URL` = the `ApiUrl` output **without the trailing slash**,
+and deploy. Finally re-run `sam deploy` with `ClientOrigin` set to your Amplify
+URL (e.g. `https://main.abc123.amplifyapp.com`) so the browser is allowed to call the API.
+
+Cost guards: `GeminiCallsPerDay` (default 300) caps the whole deployment's
+Gemini usage per day, the per-IP limit still applies, and DynamoDB runs on 5/5
+provisioned capacity, which is inside the always-free tier.

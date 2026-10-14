@@ -1,156 +1,59 @@
-import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
-import { Server } from "socket.io";
-import {
-  analyzeJobDescription,
-  generateEvaluation,
-  getNextInterviewerResponse,
-  synthesizeSpeech,
-} from "./services/gemini.js";
-import type { InitInterviewRequest, InterviewSession } from "./types.js";
+import { config, LIMITS } from "./config.js";
+import { InterviewService } from "./interview/interviewService.js";
+import { SessionStore } from "./interview/session.js";
+import { errorHandler, interviewRouter } from "./routes/interview.js";
+import { generateStructured, verifyGeminiModel } from "./services/gemini/geminiClient.js";
+import { ipRateLimit } from "./services/rateLimiter.js";
 
-const app = express();
-const httpServer = createServer(app);
+// React -> this server -> Gemini. The browser never sees the Gemini key or
+// prompts; it only receives validated, structured results.
 
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
+let modelStatus: "unchecked" | "ok" | "unavailable" = "unchecked";
+let modelStatusMessage = "";
 
-app.use(cors({ origin: CLIENT_ORIGIN }));
-app.use(express.json({ limit: "2mb" }));
-
-const io = new Server(httpServer, {
-  cors: { origin: CLIENT_ORIGIN },
-});
-
-// In-memory session store for the MVP. Keyed by rubricId so it can be
-// lifted into a `sessions` table (Postgres/Supabase) later by swapping
-// this Map for a repository with the same get/set/delete shape.
-const sessions = new Map<string, InterviewSession>();
-
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
-});
-
-app.post("/api/interview/init", async (req, res) => {
-  try {
-    const { jobDescription, candidateResume } = req.body as InitInterviewRequest;
-
-    if (!jobDescription || jobDescription.trim().length < 20) {
-      return res.status(400).json({ error: "jobDescription is required (min 20 chars)." });
-    }
-
-    const analysis = await analyzeJobDescription(jobDescription, candidateResume);
-    const rubricId = randomUUID();
-
-    sessions.set(rubricId, {
-      rubricId,
-      jobDescription,
-      candidateResume,
-      persona: analysis.interviewerPersona,
-      keyCompetencies: analysis.keyCompetencies,
-      seniorityLevel: analysis.seniorityLevel,
-      history: [{ role: "interviewer", text: analysis.initialGreeting }],
-      createdAt: Date.now(),
-    });
-
-    res.json({
-      rubricId,
-      interviewerPersona: analysis.interviewerPersona,
-      keyCompetencies: analysis.keyCompetencies,
-      initialGreeting: analysis.initialGreeting,
-      seniorityLevel: analysis.seniorityLevel,
-    });
-  } catch (err) {
-    console.error("[init] failed:", err);
-    res.status(500).json({ error: "Failed to initialize interview." });
+async function main() {
+  if (!config.geminiApiKey) {
+    console.error("\n[config] GEMINI_API_KEY is not set. Copy server/.env.example to server/.env and fill it in.\n");
+    process.exit(1);
   }
-});
 
-app.post("/api/interview/evaluate", async (req, res) => {
-  try {
-    const { rubricId } = req.body as { rubricId: string };
-    const session = sessions.get(rubricId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found." });
+  if (config.geminiStartupCheck) {
+    const result = await verifyGeminiModel();
+    if (result.ok) {
+      modelStatus = "ok";
+      console.log(`[gemini] model "${config.geminiModel}" is available.`);
+    } else if (result.fatal) {
+      console.error(`\n[config] ${result.message}\n`);
+      process.exit(1);
+    } else {
+      // Rate limit or network blip: start anyway, requests will surface it.
+      modelStatus = "unavailable";
+      modelStatusMessage = result.message;
+      console.warn(`[gemini] startup check for "${config.geminiModel}" did not succeed: ${result.message}`);
     }
-
-    const report = await generateEvaluation(
-      session.persona,
-      session.keyCompetencies,
-      session.seniorityLevel,
-      session.history
-    );
-
-    res.json(report);
-  } catch (err) {
-    console.error("[evaluate] failed:", err);
-    res.status(500).json({ error: "Failed to generate evaluation." });
   }
-});
 
-// --- Socket.io: live call loop -------------------------------------------
-// Transcription happens client-side (browser Web Speech API) to avoid
-// streaming raw audio to the server and burning free-tier audio tokens on
-// Gemini; only finished text utterances travel over the socket.
-io.on("connection", (socket) => {
-  let activeRubricId: string | null = null;
+  const app = express();
+  app.set("trust proxy", "loopback");
+  app.use(cors({ origin: config.clientOrigin }));
+  app.use(express.json({ limit: "512kb" }));
 
-  socket.on("start-interview", (rubricId: string) => {
-    const session = sessions.get(rubricId);
-    if (!session) {
-      socket.emit("interview-error", { message: "Unknown session." });
-      return;
-    }
-    activeRubricId = rubricId;
-    socket.join(rubricId);
-    // Replay the greeting generated during init so the avatar speaks it
-    // once the call room has actually mounted and is listening.
-    const greeting = session.history[0];
-    synthesizeSpeech(greeting.text).then((audio) => {
-      socket.emit("ai-response-spoken", { text: greeting.text, audio });
-    });
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true, model: config.geminiModel, modelStatus, modelStatusMessage });
   });
 
-  socket.on("candidate-speech-transcript", async (payload: { text: string }) => {
-    if (!activeRubricId) {
-      socket.emit("interview-error", { message: "No active interview session." });
-      return;
-    }
-    const session = sessions.get(activeRubricId);
-    if (!session) {
-      socket.emit("interview-error", { message: "Session expired." });
-      return;
-    }
+  const store = new SessionStore();
+  store.startSweeper();
+  const service = new InterviewService(generateStructured, store);
 
-    const candidateText = payload.text?.trim();
-    if (!candidateText) return;
+  app.use("/api/interview", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), interviewRouter(service));
+  app.use(errorHandler);
 
-    session.history.push({ role: "candidate", text: candidateText });
-
-    try {
-      const aiText = await getNextInterviewerResponse(
-        session.persona,
-        session.keyCompetencies,
-        session.seniorityLevel,
-        session.history
-      );
-      session.history.push({ role: "interviewer", text: aiText });
-      const audio = await synthesizeSpeech(aiText);
-      socket.emit("ai-response-spoken", { text: aiText, audio });
-    } catch (err) {
-      console.error("[candidate-speech-transcript] failed:", err);
-      socket.emit("interview-error", { message: "The interviewer failed to respond." });
-    }
+  app.listen(config.port, () => {
+    console.log(`InterviewerAI server listening on :${config.port} (Gemini model: ${config.geminiModel})`);
   });
+}
 
-  socket.on("disconnect", () => {
-    activeRubricId = null;
-  });
-});
-
-const PORT = Number(process.env.PORT ?? 4000);
-httpServer.listen(PORT, () => {
-  console.log(`InterviewerAI server listening on :${PORT}`);
-});
+void main();

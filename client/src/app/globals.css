@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  @apply bg-canvas font-sans text-ink;
+}
+
+::selection {
+  background: rgba(0, 113, 227, 0.25);
+}
+
+@layer components {
+  /* The huge, tight display type used as a visual anchor. */
+  .display {
+    @apply font-semibold leading-[0.92] tracking-[-0.045em];
+    font-size: clamp(3.5rem, 11vw, 10rem);
+  }
+  .eyebrow {
+    @apply text-sm font-medium tracking-tight text-mute;
+  }
+  .field {
+    @apply w-full rounded-2xl border border-transparent bg-white px-5 py-4 text-[17px] leading-relaxed text-ink shadow-card outline-none transition placeholder:text-black/30 focus:border-accent focus:ring-4 focus:ring-accent/15;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-accent px-8 py-4 text-[17px] font-medium text-white transition hover:bg-[#0077ed] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-quiet {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-black/[0.06] px-6 py-3 text-[15px] font-medium text-ink transition hover:bg-black/10 active:scale-[0.98];
+  }
+  .card {
+    @apply rounded-[28px] bg-white p-7 shadow-card sm:p-9;
+  }
+  .glass {
+    @apply bg-white/10 backdrop-blur-2xl backdrop-saturate-150;
+  }
+}
