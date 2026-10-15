@@ -49,9 +49,11 @@ async function init() {
   const store = new SessionStore();
   return createLambdaApp({
     tts:
-      config.ttsEnabled && config.deepgramApiKey
+      // Read from the environment, not `config`: that module is cached for the life of the
+      // instance, so it would keep the empty key from a failed first attempt.
+      config.ttsEnabled && process.env.DEEPGRAM_API_KEY
       ? {
-          synthesize: createDeepgramSynthesizer({ apiKey: config.deepgramApiKey, model: config.deepgramModel }),
+          synthesize: createDeepgramSynthesizer({ apiKey: process.env.DEEPGRAM_API_KEY, model: config.deepgramModel }),
           charsPerDay: config.ttsCharsPerDay,
           requestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
         }
@@ -69,9 +71,19 @@ async function init() {
 
 // Cached across warm invocations; a failed init is retried on the next request.
 let app: ReturnType<typeof init> | undefined;
+let initializedAt = 0;
+/** Wait this long before trying again to read a voice key that could not be read. */
+const VOICE_KEY_RETRY_MS = 30_000;
+
+/** True when the voice key is configured in SSM but was not loaded (e.g. permission added after this instance started). */
+const voiceKeyMissing = () => Boolean(process.env.DEEPGRAM_API_KEY_PARAMETER) && !process.env.DEEPGRAM_API_KEY;
 
 export async function handler(event: UrlEvent): Promise<UrlResult> {
-  app ??= init().catch((err) => {
+  if (app && voiceKeyMissing() && Date.now() - initializedAt > VOICE_KEY_RETRY_MS) app = undefined;
+  app ??= init().then((created) => {
+    initializedAt = Date.now();
+    return created;
+  }).catch((err) => {
     app = undefined;
     throw err;
   });
