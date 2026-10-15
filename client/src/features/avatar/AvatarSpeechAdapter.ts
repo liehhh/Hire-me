@@ -10,7 +10,7 @@ import {
 } from "../tts/visemeTiming";
 
 // Bridges generated speech audio to the 3D avatar's face without the avatar
-// knowing anything about Kokoro: it receives raw PCM + timing metadata and
+// knowing anything about the TTS engine: it receives raw PCM + timing metadata and
 // animates mouth/head morph targets in sync with the playback clock.
 
 export interface SpeechMetadata {

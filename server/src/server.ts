@@ -50,7 +50,7 @@ async function main() {
   const service = new InterviewService(generateStructured, store);
 
   app.use("/api/interview", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), interviewRouter(service));
-  // Cloud voice (needs AWS credentials locally; phones use it, desktops use Kokoro).
+  // Cloud voice (needs AWS credentials locally).
   if (config.ttsEnabled) {
     const synthesize = createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine });
     app.post("/api/tts", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), (req, res, next) => {

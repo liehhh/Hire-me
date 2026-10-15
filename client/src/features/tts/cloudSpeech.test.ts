@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CloudSpeechClient, splitSentences, type DecodeAudio, type FetchAudio } from "./cloudSpeech";
-import type { TTSAudioChunk } from "./kokoroTypes";
+import type { TTSAudioChunk } from "./ttsTypes";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -44,12 +44,6 @@ describe("splitSentences", () => {
 describe("CloudSpeechClient", () => {
   const text = "This is the first sentence of the reply. This is the second sentence of the reply.";
 
-  it("is ready immediately — there is no model to load", async () => {
-    const client = new CloudSpeechClient(async () => new ArrayBuffer(1), decode);
-    expect(client.status.modelState).toBe("ready");
-    await expect(client.load()).resolves.toBeUndefined();
-  });
-
   it("delivers decoded sentences in order even when later ones arrive first", async () => {
     const releases: Array<() => void> = [];
     const fetchAudio: FetchAudio = (t) =>
@@ -59,7 +53,7 @@ describe("CloudSpeechClient", () => {
       });
     const client = new CloudSpeechClient(fetchAudio, decode);
     const chunks: TTSAudioChunk[] = [];
-    const { done } = client.synthesize(text, { voice: "x" }, (c) => chunks.push(c));
+    const done = client.synthesize(text, (c) => chunks.push(c));
 
     await tick();
     releases[1](); // the second sentence finishes first
@@ -80,7 +74,7 @@ describe("CloudSpeechClient", () => {
     const fetchAudio = vi.fn<FetchAudio>(() => new Promise((resolve) => pending.push(() => resolve(new ArrayBuffer(1)))));
     const client = new CloudSpeechClient(fetchAudio, decode);
     const sentences = Array.from({ length: 6 }, (_, i) => `This is sentence number ${i + 1} of the long reply.`).join(" ");
-    const { done } = client.synthesize(sentences, { voice: "x" }, () => undefined);
+    const done = client.synthesize(sentences, () => undefined);
     await tick();
     expect(fetchAudio).toHaveBeenCalledTimes(3);
     pending[0]();
@@ -96,7 +90,7 @@ describe("CloudSpeechClient", () => {
       new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
     const client = new CloudSpeechClient(fetchAudio, decode);
     const onChunk = vi.fn();
-    const { done } = client.synthesize(text, { voice: "x" }, onChunk);
+    const done = client.synthesize(text, onChunk);
     await tick();
     client.cancel();
     await expect(done).resolves.toBe("cancelled");
@@ -110,11 +104,11 @@ describe("CloudSpeechClient", () => {
         if (t.startsWith("Second")) resolve(new ArrayBuffer(1));
       });
     const client = new CloudSpeechClient(fetchAudio, decode);
-    const first = client.synthesize("First reply that never finishes loading from the server.", { voice: "x" }, vi.fn());
+    const first = client.synthesize("First reply that never finishes loading from the server.", vi.fn());
     const onChunk = vi.fn();
-    const second = client.synthesize("Second reply that loads right away from the server.", { voice: "x" }, onChunk);
-    await expect(first.done).resolves.toBe("cancelled");
-    await expect(second.done).resolves.toBe("completed");
+    const second = client.synthesize("Second reply that loads right away from the server.", onChunk);
+    await expect(first).resolves.toBe("cancelled");
+    await expect(second).resolves.toBe("completed");
     expect(onChunk).toHaveBeenCalledTimes(1);
   });
 
@@ -125,8 +119,7 @@ describe("CloudSpeechClient", () => {
     });
     const client = new CloudSpeechClient(fetchAudio, decode);
     const onChunk = vi.fn();
-    const { done } = client.synthesize(text, { voice: "x" }, onChunk);
-    await expect(done).rejects.toThrow("network down");
+    await expect(client.synthesize(text, onChunk)).rejects.toThrow("network down");
     expect(onChunk).not.toHaveBeenCalled();
   });
 });

@@ -1,14 +1,13 @@
 import { interviewApi } from "../../api/interviewApi";
 import { breadcrumb } from "../../lib/debugLog";
 import { getAudioContext } from "./audioPlayback";
-import type { KokoroClientStatus } from "./kokoroClient";
-import type { SynthesisOutcome, TTSAudioChunk } from "./kokoroTypes";
-import { trimSilence } from "./kokoroWorkerCore";
+import { trimSilence } from "./trimSilence";
+import type { SynthesisOutcome, TTSAudioChunk } from "./ttsTypes";
 
-// Cloud speech engine: the server turns each sentence into MP3 (Amazon
-// Polly), the browser decodes it to PCM, and it flows into the same playback
-// and lip-sync path as Kokoro's output. It needs no model download, no WASM
-// and no GPU, so it is safe on phones.
+// The interviewer's voice: the server turns each sentence into MP3 (Amazon
+// Polly), the browser decodes it to PCM, and it flows into the playback and
+// lip-sync path. Nothing is downloaded or run on the device beyond audio
+// decoding, so it behaves the same on desktops and phones.
 
 export interface DecodedAudio {
   samples: Float32Array;
@@ -100,9 +99,6 @@ function deferred<T>(): Deferred<T> {
 }
 
 export class CloudSpeechClient {
-  // No model to load: the engine is ready as soon as it exists.
-  status: KokoroClientStatus = { modelState: "ready", progress: 100, device: null, error: null };
-  private nextRequestId = 1;
   private active: AbortController | null = null;
 
   constructor(
@@ -110,31 +106,22 @@ export class CloudSpeechClient {
     private readonly decode: DecodeAudio = defaultDecode
   ) {}
 
-  subscribe(listener: (status: KokoroClientStatus) => void): () => void {
-    listener(this.status);
-    return () => undefined;
-  }
-
-  load(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  /** Starting a new synthesis cancels the previous one, like the Kokoro client. */
-  synthesize(
-    text: string,
-    _options: { voice: string; speed?: number },
-    onChunk: (chunk: TTSAudioChunk) => void
-  ): { requestId: number; done: Promise<SynthesisOutcome> } {
+  /**
+   * Synthesizes text sentence by sentence. Starting a new synthesis cancels
+   * the previous one. Resolves "cancelled" if cancel() (or a newer synthesize)
+   * supersedes it, and rejects if a sentence cannot be fetched or decoded.
+   */
+  synthesize(text: string, onChunk: (chunk: TTSAudioChunk) => void): Promise<SynthesisOutcome> {
     this.cancel();
-    const requestId = this.nextRequestId++;
     const abort = new AbortController();
     this.active = abort;
     const { signal } = abort;
 
     const parts = splitSentences(text);
     const results = parts.map(() => deferred<DecodedAudio>());
-    // Sentences that never started fetching must not leave `done` waiting.
+    // Sentences that never started fetching must not leave the caller waiting.
     signal.addEventListener("abort", () => results.forEach((r) => r.reject(new Error("cancelled"))), { once: true });
+
     let started = 0;
     let inFlight = 0;
     const pump = () => {
@@ -152,13 +139,13 @@ export class CloudSpeechClient {
     };
     pump();
 
-    const done = (async (): Promise<SynthesisOutcome> => {
+    return (async (): Promise<SynthesisOutcome> => {
       try {
         for (let i = 0; i < parts.length; i++) {
           const { samples, sampleRate } = await results[i].promise;
           if (signal.aborted) return "cancelled";
           const trimmed = trimSilence(samples, sampleRate);
-          breadcrumb(`cloud-tts: sentence ${i + 1}/${parts.length} ${(trimmed.length / sampleRate).toFixed(1)}s`);
+          breadcrumb(`speech: sentence ${i + 1}/${parts.length} ${(trimmed.length / sampleRate).toFixed(1)}s`);
           onChunk({
             chunkIndex: i,
             text: parts[i],
@@ -171,14 +158,12 @@ export class CloudSpeechClient {
       } catch (err) {
         if (signal.aborted) return "cancelled";
         abort.abort(); // stop fetching the remaining sentences
-        breadcrumb(`cloud-tts: failed ${String(err)}`);
+        breadcrumb(`speech: failed ${String(err)}`);
         throw err;
       } finally {
         if (this.active === abort) this.active = null;
       }
     })();
-
-    return { requestId, done };
   }
 
   cancel(): void {

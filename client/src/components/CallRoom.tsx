@@ -18,7 +18,7 @@ import {
   Keyboard,
 } from "lucide-react";
 import { breadcrumb } from "../lib/debugLog";
-import { isMobileDevice, urlFlag } from "../lib/device";
+import { urlFlag } from "../lib/device";
 import { AvatarContainer } from "./AvatarContainer";
 import { humanize } from "./InterviewPrep";
 import type { AvatarSpeechAdapter } from "../features/avatar/AvatarSpeechAdapter";
@@ -65,11 +65,8 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
   const convo = useConversation({ analysis, avatar: avatarRef, onEnd });
   const { state, tts, voice } = convo;
 
-  // If Kokoro is forced on a phone, its model and the 3D avatar start one
-  // after the other, not together. The cloud voice has nothing to load, so the
-  // avatar starts at once. ?avatar=0 disables the avatar (diagnostics).
+  // ?avatar=0 disables the 3D avatar (diagnostics).
   const avatarOff = urlFlag("avatar") === "0";
-  const avatarEnabled = tts.engine === "cloud" || !isMobileDevice() || tts.isReady || tts.modelFailed;
 
   const [micLevel, setMicLevel] = useState(0);
   const [isCameraOn, setIsCameraOn] = useState(false);
@@ -169,14 +166,7 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
     setTypedAnswer("");
   };
 
-  const voiceStatus =
-    state === "ai_speaking" && tts.isLoadingModel
-      ? tts.progress !== null && tts.progress < 100
-        ? `Downloading voice model… ${tts.progress}%`
-        : "Preparing interviewer voice…"
-      : state === "ai_speaking" && !tts.isSpeaking
-        ? "Generating speech…"
-        : null;
+  const voiceStatus = state === "ai_speaking" && !tts.isSpeaking ? "Generating speech…" : null;
 
   const recordedMs = convo.answerStartedAt ? now - convo.answerStartedAt : 0;
   const plan = analysis.interviewBlueprint;
@@ -246,7 +236,7 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
 
       <div className="flex min-h-0 flex-1 gap-3 sm:gap-4">
         <div className="relative min-w-0 flex-1">
-          <AvatarContainer ref={avatarRef} enabled={avatarEnabled} off={avatarOff} />
+          <AvatarContainer ref={avatarRef} off={avatarOff} />
 
           <div className="absolute left-5 top-5 flex flex-col items-start gap-2">
             <span

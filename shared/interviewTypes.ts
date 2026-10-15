@@ -383,7 +383,7 @@ export interface RespondResponse {
   nextAction: NextAction;
   nextQuestion?: InterviewQuestion;
   shouldContinue: boolean;
-  /** Short text for Kokoro to speak: optional acknowledgement + question (or closing). */
+  /** Short text for the interviewer to speak: optional acknowledgement + question (or closing). */
   conversationMessage: string;
   progress: InterviewProgress;
 }
@@ -419,7 +419,7 @@ export type ApiErrorCode =
   | "INTERNAL_ERROR";
 
 // --- POST /api/tts -----------------------------------------------------------
-// Cloud speech for devices that can't run the on-device voice model (phones).
+// The interviewer's voice: text in, audio out (Amazon Polly).
 
 export interface TtsRequest {
   /** One sentence or short passage of plain text. */

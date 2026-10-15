@@ -25,18 +25,15 @@ const speech = {
   calls: [] as { text: string; done: Deferred<"completed" | "cancelled" | "error"> }[],
   cancel: vi.fn(),
 };
-vi.mock("../tts/useKokoroTTS", () => ({
-  useKokoroTTS: () => ({
+vi.mock("../tts/useSpeech", () => ({
+  useSpeech: () => ({
     speak: (text: string) => {
       const done = deferred<"completed" | "cancelled" | "error">();
       speech.calls.push({ text, done });
       return done.promise;
     },
     cancel: speech.cancel,
-    preload: vi.fn(),
-    isLoadingModel: false,
     isSpeaking: false,
-    progress: null,
     needsAudioUnlock: false,
     enableAudio: vi.fn(),
   }),
@@ -382,7 +379,7 @@ describe("useConversation (strict half-duplex)", () => {
     expect(result.current.state).toBe("finished");
   });
 
-  it("15: if Kokoro fails, the mic stays closed until a retry succeeds or text mode is chosen", async () => {
+  it("15: if the voice fails, the mic stays closed until a retry succeeds or text mode is chosen", async () => {
     const { result } = render();
     await tick();
     await act(async () => speech.calls[0].done.resolve("error"));

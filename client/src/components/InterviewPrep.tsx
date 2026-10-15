@@ -17,7 +17,7 @@ export function InterviewPrep({ analysis, onStart, onBack }: InterviewPrepProps)
 
   const handleStart = () => {
     // Create/resume the interviewer's AudioContext inside this click so
-    // browser autoplay policies allow the local Kokoro voice to play later.
+    // browser autoplay policies allow the interviewer's voice to play later.
     void unlockAudio();
     onStart();
   };

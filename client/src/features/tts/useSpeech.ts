@@ -2,22 +2,21 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
 import { breadcrumb } from "../../lib/debugLog";
 import { getAudioContext, SpeechPlayer, unlockAudio } from "./audioPlayback";
-import type { KokoroClientStatus, WorkerLike } from "./kokoroClient";
-import { acquireSpeechEngine, currentSpeechEngineKind, type SpeechEngine } from "./speechEngine";
-import { DEFAULT_TTS_CONFIG, type KokoroVoiceConfig, type TTSAudioChunk } from "./kokoroTypes";
+import { getCloudSpeechClient, type CloudSpeechClient } from "./cloudSpeech";
 import { PrebufferGate } from "./prebufferGate";
+import { DEFAULT_SPEECH_CONFIG, type SpeechConfig, type TTSAudioChunk } from "./ttsTypes";
 
-// React entry point for local Kokoro speech: text in → audio out of the
+// React entry point for the interviewer's voice: text in → audio out of the
 // speakers, with the avatar's face driven via an AvatarSpeechAdapter.
 // Only the newest speak() call is ever audible; older ones are cancelled.
 
-export const TTS_ERROR_MESSAGE =
-  "The local interviewer voice could not be generated. Please retry. Your interview response is still available as text.";
+export const SPEECH_ERROR_MESSAGE =
+  "The interviewer's voice could not be generated. Please retry. Your interview response is still available as text.";
 
 export type SpeakOutcome = "completed" | "cancelled" | "error";
 
 export interface SpeakCallbacks {
-  /** Generation (and, on first use, model loading) has begun. */
+  /** Generation has begun. */
   onGenerating?: () => void;
   /** Audio has started playing. */
   onStart?: () => void;
@@ -28,17 +27,15 @@ export interface SpeakCallbacks {
   onError?: (error: Error) => void;
 }
 
-export interface UseKokoroTTSOptions extends Partial<KokoroVoiceConfig> {
+export interface UseSpeechOptions extends Partial<SpeechConfig> {
   /** Avatar to lip-sync with the generated audio. */
   avatar?: RefObject<AvatarSpeechAdapter | null>;
   onSpeechStart?: () => void;
   onSpeechEnd?: () => void;
   onSpeechCancel?: () => void;
   onSpeechError?: (error: Error) => void;
-  onModelLoading?: (progress: number | null) => void;
-  onModelReady?: () => void;
   /** Test seams. */
-  createWorker?: () => WorkerLike;
+  client?: CloudSpeechClient;
   getAudioContext?: () => AudioContext;
 }
 
@@ -48,14 +45,11 @@ interface ActiveSpeech {
   finish: (outcome: SpeakOutcome) => void;
 }
 
-export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
+export function useSpeech(options: UseSpeechOptions = {}) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  // Fixed for the lifetime of the hook: Kokoro on desktops, the cloud voice on
-  // phones. Tests that inject a worker always get Kokoro.
-  const [engineKind] = useState(() => (options.createWorker ? ("kokoro" as const) : currentSpeechEngineKind()));
-  const clientRef = useRef<SpeechEngine | null>(null);
+  const clientRef = useRef<CloudSpeechClient | null>(null);
   const playerRef = useRef<SpeechPlayer | null>(null);
   const mountedRef = useRef(false);
   const activeRef = useRef<ActiveSpeech | null>(null);
@@ -63,18 +57,12 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
   const speakingRef = useRef(false);
   const lastRequestRef = useRef<{ text: string; callbacks: SpeakCallbacks } | null>(null);
 
-  const [status, setStatus] = useState<KokoroClientStatus>({
-    modelState: "idle",
-    progress: null,
-    device: null,
-    error: null,
-  });
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
 
-  // Guards every state update so late worker/audio events can't touch an
+  // Guards every state update so late network/audio events can't touch an
   // unmounted component.
   const ifMounted = useCallback((fn: () => void) => {
     if (mountedRef.current) fn();
@@ -88,7 +76,7 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
     [ifMounted]
   );
 
-  /** Tears down the active utterance: worker generation, audio, and avatar. */
+  /** Tears down the active utterance: requests, audio, and avatar. */
   const interrupt = useCallback(
     (reason: "cancel" | "stop" | "unmount") => {
       const active = activeRef.current;
@@ -117,37 +105,24 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
 
   useEffect(() => {
     mountedRef.current = true;
-    const lease = acquireSpeechEngine(engineKind, optionsRef.current.createWorker);
-    const client = lease.engine;
-    clientRef.current = client;
-    breadcrumb(`tts: engine=${engineKind}`);
+    clientRef.current = optionsRef.current.client ?? getCloudSpeechClient();
     playerRef.current = new SpeechPlayer(optionsRef.current.getAudioContext ?? getAudioContext);
-
-    let previousState = client.status.modelState;
-    const unsubscribe = client.subscribe((next) => {
-      ifMounted(() => setStatus(next));
-      if (next.modelState === "loading") optionsRef.current.onModelLoading?.(next.progress);
-      if (next.modelState === "ready" && previousState !== "ready") optionsRef.current.onModelReady?.();
-      previousState = next.modelState;
-    });
-
     return () => {
       interrupt("unmount");
       mountedRef.current = false;
-      unsubscribe();
       playerRef.current?.stop();
       playerRef.current = null;
+      clientRef.current?.cancel();
       clientRef.current = null;
-      lease.release();
     };
-  }, [ifMounted, interrupt, engineKind]);
+  }, [interrupt]);
 
   // iOS suspends audio and timers for a hidden page; pause the utterance (and
   // with it the avatar's clock) instead of letting them drift, and continue
   // when the page is visible again.
   useEffect(() => {
     const onVisibility = () => {
-      breadcrumb(`tts: visibility=${document.visibilityState}`);
+      breadcrumb(`speech: visibility=${document.visibilityState}`);
       if (document.visibilityState === "hidden") void playerRef.current?.pause();
       else void playerRef.current?.resume();
     };
@@ -167,9 +142,7 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
       const token = ++tokenRef.current;
       const isStale = () => tokenRef.current !== token;
       const opts = optionsRef.current;
-      const voice = opts.voice ?? DEFAULT_TTS_CONFIG.voice;
-      const speed = opts.speed ?? DEFAULT_TTS_CONFIG.speed;
-      const volume = opts.volume ?? DEFAULT_TTS_CONFIG.volume;
+      const volume = opts.volume ?? DEFAULT_SPEECH_CONFIG.volume;
       const getCtx = opts.getAudioContext ?? getAudioContext;
 
       return new Promise<SpeakOutcome>((resolve) => {
@@ -193,9 +166,6 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
           void unlockAudio(getCtx).then((ok) => {
             if (!isStale()) ifMounted(() => setNeedsAudioUnlock(!ok));
           });
-
-          await client.load(voice);
-          if (isStale()) return;
 
           let markEnded!: () => void;
           const ended = new Promise<void>((r) => (markEnded = r));
@@ -231,20 +201,18 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
             const chunks = held ?? [];
             if (held && process.env.NODE_ENV !== "production") {
               const seconds = chunks.reduce((sum, c) => sum + c.duration, 0);
-              console.debug(`[kokoro-tts] playback starts with ${chunks.length} sentence(s), ${seconds.toFixed(1)}s buffered`);
+              console.debug(`[speech] playback starts with ${chunks.length} sentence(s), ${seconds.toFixed(1)}s buffered`);
             }
             held = null;
             chunks.forEach(play);
           };
 
-          const { done } = client.synthesize(trimmed, { voice, speed }, (chunk) => {
+          const outcome = await client.synthesize(trimmed, (chunk) => {
             if (isStale()) return;
             if (!held) return play(chunk);
             held.push(chunk);
             if (gate.add(chunk.text.length, chunk.duration)) release();
           });
-
-          const outcome = await done;
           if (isStale() || outcome === "cancelled") return;
           release();
           ifMounted(() => setIsGenerating(false));
@@ -270,9 +238,10 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
           ifMounted(() => {
             setIsGenerating(false);
             setIsSpeaking(false);
-            setError(TTS_ERROR_MESSAGE);
+            setError(SPEECH_ERROR_MESSAGE);
           });
-          if (process.env.NODE_ENV !== "production") console.error("[kokoro-tts] speech generation failed:", error);
+          breadcrumb(`speech: error ${error.message}`);
+          if (process.env.NODE_ENV !== "production") console.error("[speech] generation failed:", error);
           callbacks.onError?.(error);
           optionsRef.current.onSpeechError?.(error);
           finish("error");
@@ -281,16 +250,6 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
     },
     [ifMounted, interrupt, setSpeaking]
   );
-
-  /**
-   * Starts loading (and warming up) the model ahead of the first speak(), so
-   * it happens while the first question is still being prepared.
-   */
-  const preload = useCallback(() => {
-    clientRef.current?.load(optionsRef.current.voice ?? DEFAULT_TTS_CONFIG.voice).catch(() => {
-      // speak() retries the load and reports the error.
-    });
-  }, []);
 
   /** Re-speaks the most recent text (e.g. after an error). */
   const retry = useCallback((): Promise<SpeakOutcome> => {
@@ -317,7 +276,6 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
 
   return {
     speak,
-    preload,
     stop,
     cancel,
     pause,
@@ -325,17 +283,9 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
     retry,
     enableAudio,
     isSpeakingNow,
-    isLoadingModel: status.modelState === "loading",
     isGenerating,
     isSpeaking,
-    /** "kokoro" (on-device) or "cloud" (server-side voice). */
-    engine: engineKind,
-    isReady: status.modelState === "ready",
-    /** The model failed to load (a catchable error, not a page kill). */
-    modelFailed: status.modelState === "error",
     needsAudioUnlock,
     error,
-    progress: status.progress,
-    device: status.device,
   };
 }

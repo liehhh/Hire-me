@@ -1,12 +1,12 @@
 // Decides when to start playing a reply that is still being generated.
 //
-// Kokoro generates one sentence at a time. On a fast device each sentence is
+// Speech arrives one sentence at a time. On a fast connection each sentence is
 // ready long before the previous one finishes playing, so playback starts on
-// the first sentence. On a slow device (generation slower than real time)
-// starting right away leaves a silent gap at every full stop while the next
-// sentence is generated. Instead, playback is held back just long enough that
-// the buffered audio outlasts generating the rest: one slightly longer wait
-// up front, then continuous speech.
+// the first sentence. On a slow one (fetching slower than real time) starting
+// right away leaves a silent gap at every full stop while the next sentence
+// arrives. Instead, playback is held back just long enough that the buffered
+// audio outlasts fetching the rest: one slightly longer wait up front, then
+// continuous speech.
 
 /** Extra margin on the estimate, since sentence lengths vary. */
 const SAFETY = 1.15;

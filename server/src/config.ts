@@ -22,7 +22,7 @@ export const config = {
   /** Global Gemini request budget for this process. 0 disables the daily cap. */
   geminiRequestsPerMinute: intEnv("GEMINI_RPM", 8),
   geminiRequestsPerDay: intEnv("GEMINI_RPD", 0),
-  /** Cloud voice (Amazon Polly) for devices that can't run Kokoro. */
+  /** Cloud voice (Amazon Polly) that speaks the interviewer's lines. */
   ttsEnabled: (process.env.TTS_ENABLED ?? "true").toLowerCase() !== "false",
   pollyVoice: (process.env.POLLY_VOICE ?? "Joanna").trim(),
   pollyEngine: (process.env.POLLY_ENGINE ?? "neural").trim(),
@@ -46,7 +46,7 @@ export const LIMITS = {
   analysisMaxOutputTokens: 3_000,
   /** Per-turn JSON (evaluation + next question). The spoken part is capped separately. */
   liveTurnMaxOutputTokens: 1_200,
-  /** Spoken text budget — Kokoro should never be handed a monologue. */
+  /** Spoken text budget — the voice should never be handed a monologue. */
   liveResponseMaxTokens: 300,
   reportMaxOutputTokens: intEnv("REPORT_MAX_OUTPUT_TOKENS", 8_192),
   requestTimeoutMs: intEnv("GEMINI_TIMEOUT_MS", 20_000),
@@ -61,5 +61,5 @@ export const LIMITS = {
   httpRequestsPerMinutePerIp: 60,
 };
 
-/** Rough spoken length cap (~4 chars/token) for text handed to Kokoro. */
+/** Rough spoken length cap (~4 chars/token) for text handed to the voice. */
 export const MAX_SPOKEN_CHARACTERS = LIMITS.liveResponseMaxTokens * 4;

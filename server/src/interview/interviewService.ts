@@ -86,7 +86,7 @@ async function settleEvaluations(session: InterviewSession, maxWaitMs: number): 
   clearTimeout(timer);
 }
 
-/** Joins spoken parts and keeps the result short enough for Kokoro. */
+/** Joins spoken parts and keeps the result short enough to speak. */
 function spoken(...parts: (string | null | undefined)[]): string {
   const clean = parts.map((p) => (p ?? "").replace(/[*_#`>]/g, "").trim()).filter(Boolean);
   let text = clean.join(" ");

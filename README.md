@@ -7,8 +7,7 @@ followed by a report based only on what you actually said.
 ```text
 Next.js (React) ──HTTP──▶ Node/Express ──▶ Gemini (server-side only)
    │
-   └─ voice: Kokoro (in-browser Web Worker) on desktop,
-             Amazon Polly via /api/tts on phones ──▶ TalkingHead avatar lip-sync
+   └─ voice: Amazon Polly via /api/tts ──▶ TalkingHead avatar lip-sync
 ```
 
 ## Setup
@@ -39,20 +38,19 @@ npm run dev               # Next.js on http://localhost:5173
 Voice input uses the Web Speech API (Chrome/Edge) with an on-device Whisper
 fallback; you can also type answers.
 
-The interviewer voice depends on the device. Desktop browsers run Kokoro
-locally in a Web Worker (the first interview downloads the voice model once).
-Phones use Amazon Polly (neural) through `POST /api/tts` on the server, because
-Kokoro's WASM/WebGPU runtime terminates the page on iOS Safari. Polly needs the
-`polly:SynthesizeSpeech` permission (granted by `template.yaml`), and
-`TTS_CHARS_PER_DAY` caps what a deployment can spend. URL overrides:
-`?voice=cloud` or `?voice=kokoro`. A device where Kokoro killed the page once
-switches to the cloud voice automatically.
+The interviewer's voice is Amazon Polly (neural), synthesized by the server
+through `POST /api/tts` one sentence at a time and decoded in the browser, so
+it sounds the same on every device and nothing is downloaded. (An on-device
+model was tried first; its WASM/WebGPU runtime terminates the page on iOS
+Safari.) Polly needs the `polly:SynthesizeSpeech` permission (granted by
+`template.yaml`), and `TTS_CHARS_PER_DAY` caps what a deployment can spend.
+Running the server locally needs AWS credentials and a region for Polly.
 
 ### Tests
 
 ```bash
 cd server && npm test      # Gemini client, flow rules, report validation
-cd client && npm test      # Kokoro TTS pipeline
+cd client && npm test      # Speech pipeline, conversation state machine
 ```
 
 ## API
@@ -89,7 +87,7 @@ client/src/
   App.tsx                       setup → plan → call → report
   api/interviewApi.ts           Typed backend client
   components/                   SetupForm, InterviewPrep, CallRoom, FeedbackDashboard
-  features/tts/                 Kokoro TTS (worker, playback, visemes)
+  features/tts/                 Speech (cloud client, playback, visemes)
   features/avatar/              Avatar lip-sync adapter
 ```
 

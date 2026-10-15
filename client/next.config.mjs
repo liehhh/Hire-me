@@ -1,6 +1,6 @@
 // Cross-origin isolation enables SharedArrayBuffer, which lets ONNX Runtime
-// run Kokoro's WASM backend multithreaded instead of on a single core —
-// several times faster speech generation. "credentialless" keeps CORS-enabled
+// run the in-browser Whisper fallback (WASM) multithreaded instead of on a
+// single core. "credentialless" keeps CORS-enabled
 // cross-origin fetches (e.g. the Hugging Face model download) working.
 const crossOriginIsolation = [
   { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
@@ -20,7 +20,7 @@ const nextConfig = {
           return [{ source: "/:path*", headers: crossOriginIsolation }];
         },
       }),
-  // Everything heavy (transformers.js, Kokoro, TalkingHead) runs in the
+  // Everything heavy (transformers.js, TalkingHead) runs in the
   // browser only; stub the Node-specific halves of transformers.js.
   webpack(config) {
     config.resolve.alias = {

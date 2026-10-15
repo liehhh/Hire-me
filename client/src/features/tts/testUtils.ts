@@ -1,10 +1,5 @@
-import type { WorkerLike } from "./kokoroClient";
-import type { TTSWorkerRequest, TTSWorkerResponse } from "./kokoroTypes";
-import { createKokoroWorkerHandler, type EngineLoader, type KokoroEngine } from "./kokoroWorkerCore";
-
-// Test doubles for the TTS pipeline: a fake Kokoro engine, an in-process
-// "worker" running the real worker core, and a minimal AudioContext whose
-// clock and buffer completion are driven manually.
+// Test doubles for the speech pipeline: a tone generator and a minimal
+// AudioContext whose clock and buffer completion are driven manually.
 
 export const SAMPLE_RATE = 24000;
 
@@ -12,71 +7,6 @@ export function tone(seconds: number, amplitude = 0.5): Float32Array {
   const samples = new Float32Array(Math.round(seconds * SAMPLE_RATE));
   for (let i = 0; i < samples.length; i++) samples[i] = amplitude * Math.sin(i / 10);
   return samples;
-}
-
-/** Splits on sentence punctuation, yielding 0.5s of audio per sentence. */
-export function createFakeEngine(opts: { failOn?: string; delayMs?: number } = {}): KokoroEngine {
-  return {
-    async *stream(text) {
-      const sentences = text.match(/[^.!?]+[.!?]*/g) ?? [text];
-      for (const sentence of sentences) {
-        if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
-        else await Promise.resolve();
-        if (opts.failOn && sentence.includes(opts.failOn)) throw new Error("inference failed");
-        yield { text: sentence.trim(), audio: { audio: tone(0.5), sampling_rate: SAMPLE_RATE } };
-      }
-    },
-  };
-}
-
-export class InProcessWorker implements WorkerLike {
-  received: TTSWorkerRequest[] = [];
-  terminated = false;
-  private messageListeners: ((e: MessageEvent<TTSWorkerResponse>) => void)[] = [];
-  private errorListeners: ((e: ErrorEvent) => void)[] = [];
-  private handle: (req: TTSWorkerRequest) => Promise<void>;
-
-  constructor(loader: EngineLoader) {
-    this.handle = createKokoroWorkerHandler(loader, (message) => {
-      if (this.terminated) return;
-      // Deliver asynchronously, like a real worker.
-      queueMicrotask(() => {
-        if (!this.terminated) this.messageListeners.forEach((l) => l({ data: message } as MessageEvent));
-      });
-    });
-  }
-
-  postMessage(message: TTSWorkerRequest) {
-    this.received.push(message);
-    void this.handle(message);
-  }
-
-  addEventListener(type: "message" | "error", listener: (e: never) => void) {
-    if (type === "message") this.messageListeners.push(listener as never);
-    else this.errorListeners.push(listener as never);
-  }
-
-  crash(message: string) {
-    this.terminated = true; // a crashed worker posts nothing further
-    this.errorListeners.forEach((l) => l({ message } as ErrorEvent));
-  }
-
-  terminate() {
-    this.terminated = true;
-  }
-}
-
-export function fakeLoader(engine: KokoroEngine = createFakeEngine()): EngineLoader & { calls: number } {
-  const loader = Object.assign(
-    async (onProgress: (p: number) => void) => {
-      loader.calls++;
-      onProgress(50);
-      onProgress(100);
-      return { engine, device: "wasm" as const };
-    },
-    { calls: 0 }
-  );
-  return loader;
 }
 
 class FakeBufferSource {

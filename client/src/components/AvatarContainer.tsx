@@ -19,7 +19,7 @@ const DEFAULT_AVATAR_URL = "/avatars/brunette.glb";
 
 // TalkingHead's own speakText() always POSTs to a Google Cloud Text-to-Speech
 // REST endpoint, so we don't use it. Speech audio is generated locally by
-// Kokoro (see features/tts) and played by useKokoroTTS; this component only
+// the server (see features/tts) and played by useSpeech; this component only
 // renders the head and exposes an AvatarSpeechAdapter that lip-syncs the
 // face to that audio via TalkingHead's low-level setValue() morph targets.
 
@@ -27,19 +27,14 @@ const DEFAULT_AVATAR_URL = "/avatars/brunette.glb";
 // module scope: the library pulls in Three.js and touches `window` on
 // construction, which breaks SSR/test environments if imported eagerly.
 export interface AvatarContainerProps {
-  /** Hold off loading the avatar (e.g. while the voice model is starting on a phone). */
-  enabled?: boolean;
   /** Never load the avatar (diagnostic mode). */
   off?: boolean;
-  onReady?: () => void;
 }
 
 export const AvatarContainer = forwardRef<AvatarSpeechAdapter, AvatarContainerProps>(function AvatarContainer(
-  { enabled = true, off = false, onReady },
+  { off = false },
   ref
 ) {
-  const onReadyRef = useRef(onReady);
-  onReadyRef.current = onReady;
   const containerRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<TalkingHead | null>(null);
   const adapterRef = useRef<AvatarSpeechAdapter | null>(null);
@@ -52,7 +47,7 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter, AvatarContainerPr
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
-    if (!enabled || off) return;
+    if (off) return;
     let disposed = false;
 
     async function init() {
@@ -88,7 +83,6 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter, AvatarContainerPr
         breadcrumb("avatar: ready");
         headRef.current = head;
         setStatus("ready");
-        onReadyRef.current?.();
       } catch (err) {
         breadcrumb(`avatar: init failed ${String(err)}`);
         console.error("Failed to initialize TalkingHead avatar:", err);
@@ -107,7 +101,7 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter, AvatarContainerPr
       headRef.current?.stop?.();
       headRef.current = null;
     };
-  }, [enabled, off]);
+  }, [off]);
 
   useImperativeHandle(ref, () => adapterRef.current!, []);
 

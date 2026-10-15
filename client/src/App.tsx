@@ -8,7 +8,6 @@ import { CallRoom } from "./components/CallRoom";
 import { FeedbackDashboard } from "./components/FeedbackDashboard";
 import { ApiRequestError, interviewApi } from "./api/interviewApi";
 import { breadcrumb } from "./lib/debugLog";
-import { TtsDiagnostics } from "./components/TtsDiagnostics";
 import type { AnalyzeResponse, InterviewReport, TranscriptTurn } from "./types";
 
 interface FinishedInterview {
@@ -44,7 +43,6 @@ function persistView(view: View): void {
 
 export default function App() {
   const [view, setViewState] = useState<View>({ name: "setup" });
-  const [diag, setDiag] = useState(false);
   const setView = (next: View) => {
     breadcrumb(`view: ${next.name}`);
     persistView(next);
@@ -52,7 +50,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    setDiag(new URLSearchParams(location.search).get("diag") === "1");
     try {
       const saved = sessionStorage.getItem(RESUME_KEY);
       if (saved) {
@@ -87,8 +84,6 @@ export default function App() {
       finishingRef.current = false;
     }
   };
-
-  if (diag) return <TtsDiagnostics />;
 
   return (
     <main className="min-h-dvh">

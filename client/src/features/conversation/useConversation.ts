@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import { ApiRequestError, interviewApi, isCancelled } from "../../api/interviewApi";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
-import { useKokoroTTS } from "../tts/useKokoroTTS";
+import { useSpeech } from "../tts/useSpeech";
 import type {
   AnalyzeResponse,
   AnswerCompletionReason,
@@ -21,9 +21,9 @@ import { appendFinalChunk } from "./transcript";
 //
 //   AI speaks → audio fully ends → mic opens → candidate speaks freely →
 //   candidate finishes → mic closes, answer locked to its turn/question →
-//   one backend request → Kokoro speaks one response → repeat.
+//   one backend request → the interviewer speaks one response → repeat.
 //
-// Kokoro, speech recognition and the network never change the state on
+// the voice, speech recognition and the network never change the state on
 // their own; they report back here and every move is checked by the
 // ConversationMachine. Async results carry the turn/request they belong to
 // and are dropped if that turn is no longer current.
@@ -128,7 +128,7 @@ export function useConversation(options: {
   const [error, setError] = useState<ConversationError | null>(null);
   const [answerStartedAt, setAnswerStartedAt] = useState<number | null>(null);
 
-  const tts = useKokoroTTS({ avatar: options.avatar });
+  const tts = useSpeech({ avatar: options.avatar });
 
 
   // --- timers ------------------------------------------------------------------
@@ -257,7 +257,7 @@ export function useConversation(options: {
     if (token !== speechTokenRef.current || !machine.is("ai_speaking")) return; // ended meanwhile
 
     if (outcome !== "completed") {
-      // Kokoro failed (or was torn down underneath us): keep the mic closed
+      // The voice failed (or was torn down underneath us): keep the mic closed
       // and offer to retry the same line.
       machine.transition("error");
       setError({
@@ -321,7 +321,6 @@ export function useConversation(options: {
     mountedRef.current = true;
     if (!startedRef.current) {
       startedRef.current = true;
-      tts.preload();
       void runStart();
     }
     return () => {

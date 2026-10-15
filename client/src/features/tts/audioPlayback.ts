@@ -1,4 +1,4 @@
-// Web Audio playback for Kokoro PCM output. Sentence chunks are scheduled
+// Web Audio playback for decoded speech PCM. Sentence chunks are scheduled
 // back-to-back on the AudioContext clock, which also serves as the timing
 // reference for the avatar's lip-sync (it freezes while paused, so mouth
 // animation pauses with the audio).

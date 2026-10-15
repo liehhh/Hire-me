@@ -1,31 +1,24 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
-import { resetSharedKokoroClientForTests } from "./kokoroClient";
-import { createFakeEngine, FakeAudioContext, fakeLoader, InProcessWorker } from "./testUtils";
-import { TTS_ERROR_MESSAGE, useKokoroTTS, type UseKokoroTTSOptions } from "./useKokoroTTS";
+import { CloudSpeechClient, type FetchAudio } from "./cloudSpeech";
+import { FakeAudioContext, SAMPLE_RATE, tone } from "./testUtils";
+import { SPEECH_ERROR_MESSAGE, useSpeech, type UseSpeechOptions } from "./useSpeech";
 
-function setup(engine = createFakeEngine(), extra: Partial<UseKokoroTTSOptions> = {}) {
+/** A real CloudSpeechClient whose network and decoder are replaced: 0.5 s of audio per sentence. */
+function setup(opts: { fetchAudio?: FetchAudio } = {}, extra: Partial<UseSpeechOptions> = {}) {
   const ctx = new FakeAudioContext();
-  const workers: InProcessWorker[] = [];
+  const fetchAudio = vi.fn<FetchAudio>(opts.fetchAudio ?? (async () => new ArrayBuffer(1)));
+  const client = new CloudSpeechClient(fetchAudio, async () => ({ samples: tone(0.5), sampleRate: SAMPLE_RATE }));
   const avatar: AvatarSpeechAdapter = {
     speak: vi.fn(() => Promise.resolve()),
     stop: vi.fn(),
     cancel: vi.fn(),
   };
   const hook = renderHook(() =>
-    useKokoroTTS({
-      createWorker: () => {
-        const w = new InProcessWorker(fakeLoader(engine));
-        workers.push(w);
-        return w;
-      },
-      getAudioContext: () => ctx.asAudioContext(),
-      avatar: { current: avatar },
-      ...extra,
-    })
+    useSpeech({ client, getAudioContext: () => ctx.asAudioContext(), avatar: { current: avatar }, ...extra })
   );
-  return { ...hook, ctx, workers, avatar };
+  return { ...hook, ctx, fetchAudio, avatar };
 }
 
 /** Waits until every scheduled chunk is queued, then plays the audio out. */
@@ -34,19 +27,17 @@ async function playOut(ctx: FakeAudioContext, chunks: number) {
   act(() => ctx.advance(10));
 }
 
-describe("useKokoroTTS", () => {
-  afterEach(() => resetSharedKokoroClientForTests());
+const TWO = "Welcome in, thanks for joining me today. Tell me a little about yourself and your background.";
 
-  it("loads the model lazily on first speak and plays audio with callbacks in order", async () => {
-    const onModelReady = vi.fn();
-    const { result, ctx, workers, avatar, unmount } = setup(createFakeEngine(), { onModelReady });
-    expect(result.current.isReady).toBe(false);
-    expect(workers[0].received).toEqual([]); // nothing loaded until needed
+describe("useSpeech", () => {
+  it("fetches speech on speak and plays audio with callbacks in order", async () => {
+    const { result, ctx, fetchAudio, avatar, unmount } = setup();
+    expect(fetchAudio).not.toHaveBeenCalled(); // nothing requested until needed
 
     const events: string[] = [];
     let promise!: Promise<string>;
     act(() => {
-      promise = result.current.speak("Welcome in. Tell me about yourself.", {
+      promise = result.current.speak(TWO, {
         onGenerating: () => events.push("thinking"),
         onStart: () => events.push("speaking"),
         onEnd: () => events.push("idle"),
@@ -54,46 +45,38 @@ describe("useKokoroTTS", () => {
     });
 
     await waitFor(() => expect(result.current.isSpeaking).toBe(true));
-    expect(result.current.isReady).toBe(true);
-    expect(onModelReady).toHaveBeenCalledTimes(1);
     await playOut(ctx, 2);
 
     await expect(promise).resolves.toBe("completed");
     expect(events).toEqual(["thinking", "speaking", "idle"]);
     await waitFor(() => expect(result.current.isSpeaking).toBe(false));
     expect(result.current.isGenerating).toBe(false);
+    expect(fetchAudio).toHaveBeenCalledTimes(2);
     expect(avatar.speak).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(avatar.speak).mock.calls[0][1]).toMatchObject({ text: "Welcome in.", sampleRate: 24000 });
-    unmount();
-  });
-
-  it("does not reload the model for later responses", async () => {
-    const { result, ctx, workers, unmount } = setup();
-    for (const text of ["First.", "Second."]) {
-      let p!: Promise<string>;
-      act(() => {
-        p = result.current.speak(text);
-      });
-      await playOut(ctx, 1);
-      await p;
-      ctx.sources = [];
-    }
-    expect(workers[0].received.filter((m) => m.type === "load-model")).toHaveLength(1);
+    expect(vi.mocked(avatar.speak).mock.calls[0][1]).toMatchObject({
+      text: "Welcome in, thanks for joining me today.",
+      sampleRate: SAMPLE_RATE,
+    });
     unmount();
   });
 
   it("a new response cancels the one in progress", async () => {
-    const { result, ctx, avatar, unmount } = setup(createFakeEngine({ delayMs: 5 }));
+    const slow: FetchAudio = (t, signal) =>
+      new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        setTimeout(() => resolve(new ArrayBuffer(1)), t.startsWith("Old") ? 20 : 0);
+      });
+    const { result, ctx, avatar, unmount } = setup({ fetchAudio: slow });
     const first = { onCancel: vi.fn(), onEnd: vi.fn() };
     const second = { onEnd: vi.fn() };
     let p1!: Promise<string>;
     let p2!: Promise<string>;
     act(() => {
-      p1 = result.current.speak("Old one. Old two. Old three.", first);
+      p1 = result.current.speak("Old one is long enough to count as a sentence. Old two follows right after it.", first);
     });
     await waitFor(() => expect(result.current.isSpeaking).toBe(true));
     act(() => {
-      p2 = result.current.speak("Newest question?", second);
+      p2 = result.current.speak("Newest question, please answer it with an example from work?", second);
     });
 
     await expect(p1).resolves.toBe("cancelled");
@@ -114,7 +97,7 @@ describe("useKokoroTTS", () => {
     const onCancel = vi.fn();
     let p!: Promise<string>;
     act(() => {
-      p = result.current.speak("Hello there.", { onCancel });
+      p = result.current.speak("Hello there, and welcome to your mock interview today.", { onCancel });
     });
     await waitFor(() => expect(result.current.isSpeaking).toBe(true));
     act(() => result.current.cancel());
@@ -130,7 +113,7 @@ describe("useKokoroTTS", () => {
     const onEnd = vi.fn();
     let p!: Promise<string>;
     act(() => {
-      p = result.current.speak("Hello there.", { onEnd });
+      p = result.current.speak("Hello there, and welcome to your mock interview today.", { onEnd });
     });
     await waitFor(() => expect(result.current.isSpeaking).toBe(true));
     act(() => result.current.stop());
@@ -139,17 +122,21 @@ describe("useKokoroTTS", () => {
     unmount();
   });
 
-  it("surfaces worker errors with a retry, without any fallback voice", async () => {
+  it("surfaces a failed request with a retry, without any fallback voice", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { result, unmount } = setup(createFakeEngine({ failOn: "fail" }));
+    const { result, unmount } = setup({
+      fetchAudio: async () => {
+        throw new Error("server unavailable");
+      },
+    });
     const onError = vi.fn();
     let p!: Promise<string>;
     act(() => {
-      p = result.current.speak("This will fail.", { onError });
+      p = result.current.speak("This request will fail, as the server is down.", { onError });
     });
     await expect(p).resolves.toBe("error");
-    await waitFor(() => expect(result.current.error).toBe(TTS_ERROR_MESSAGE));
-    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "inference failed" }));
+    await waitFor(() => expect(result.current.error).toBe(SPEECH_ERROR_MESSAGE));
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "server unavailable" }));
     expect(result.current.isSpeaking).toBe(false);
     expect(consoleSpy).toHaveBeenCalled(); // technical detail logged in dev only
 
@@ -162,19 +149,15 @@ describe("useKokoroTTS", () => {
     unmount();
   });
 
-  it("cleans up on unmount: cancels audio and terminates the worker", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const { result, ctx, workers, unmount } = setup();
+  it("cleans up on unmount: silences the audio and stops requesting more", async () => {
+    const { result, ctx, unmount } = setup();
     const onStart = vi.fn();
     act(() => {
-      void result.current.speak("Hello there. Still talking.", { onStart });
+      void result.current.speak("Hello there, welcome. Still talking for a little while longer now.", { onStart });
     });
     await waitFor(() => expect(onStart).toHaveBeenCalled());
 
     unmount();
     expect(ctx.sources.every((s) => s.stopped)).toBe(true);
-    vi.advanceTimersByTime(3000);
-    expect(workers[0].terminated).toBe(true);
-    vi.useRealTimers();
   });
 });

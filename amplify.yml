@@ -20,7 +20,7 @@ applications:
         paths:
           - node_modules/**/*
     # Same headers as next.config.mjs; they enable SharedArrayBuffer for the
-    # multithreaded Kokoro voice model.
+    # multithreaded in-browser Whisper fallback.
     customHeaders:
       - pattern: "**"
         headers:

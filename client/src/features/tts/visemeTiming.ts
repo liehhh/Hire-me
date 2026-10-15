@@ -1,4 +1,4 @@
-// Deterministic lip-sync timing. Kokoro returns audio without word or
+// Deterministic lip-sync timing. The TTS service returns audio without word or
 // phoneme timestamps, so we approximate them: the text is converted to
 // Oculus visemes (TalkingHead's morph target set), relative viseme
 // durations are stretched to fit the span of the audio that actually

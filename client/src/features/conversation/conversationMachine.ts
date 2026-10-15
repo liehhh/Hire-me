@@ -18,7 +18,7 @@ export type ConversationState =
 const TRANSITIONS: Record<ConversationState, readonly ConversationState[]> = {
   idle: ["preparing", "finished"],
   preparing: ["ai_speaking", "error", "finished"],
-  // Only after Kokoro's audio has completely ended.
+  // Only after the interviewer's audio has completely ended.
   ai_speaking: ["waiting_for_candidate", "finished", "error"],
   waiting_for_candidate: ["candidate_speaking", "finished", "error"],
   candidate_speaking: ["candidate_finished", "finished", "error"],
