@@ -29,6 +29,10 @@ Parameters:
     Type: String
     Default: Joanna
     Description: Polly voice id for the interviewer on devices that can't run the on-device voice.
+  PollyRegion:
+    Type: String
+    Default: ""
+    Description: Region to call Polly in. Leave empty to use the stack's region; set it (e.g. us-east-1 or eu-west-1) if that region has no neural voices.
   PollyEngine:
     Type: String
     Default: neural
@@ -85,6 +89,7 @@ Resources:
           TTS_CHARS_PER_DAY: !Ref TtsCharsPerDay
           POLLY_VOICE: !Ref PollyVoice
           POLLY_ENGINE: !Ref PollyEngine
+          POLLY_REGION: !Ref PollyRegion
           NODE_OPTIONS: --enable-source-maps
       Policies:
         - DynamoDBCrudPolicy:

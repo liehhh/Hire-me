@@ -35,7 +35,7 @@ async function init() {
   return createLambdaApp({
     tts: config.ttsEnabled
       ? {
-          synthesize: createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine }),
+          synthesize: createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine, region: config.pollyRegion || undefined }),
           charsPerDay: config.ttsCharsPerDay,
           requestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
         }

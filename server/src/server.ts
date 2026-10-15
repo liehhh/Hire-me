@@ -52,7 +52,7 @@ async function main() {
   app.use("/api/interview", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), interviewRouter(service));
   // Cloud voice (needs AWS credentials locally).
   if (config.ttsEnabled) {
-    const synthesize = createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine });
+    const synthesize = createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine, region: config.pollyRegion || undefined });
     app.post("/api/tts", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), (req, res, next) => {
       speak(synthesize, req.body)
         .then((body) => res.json(body))

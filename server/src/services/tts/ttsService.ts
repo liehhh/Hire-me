@@ -16,12 +16,14 @@ export type SpeechSynthesizer = (text: string) => Promise<{ audio: Uint8Array; m
 export interface PollyOptions {
   voice: string;
   engine: string;
+  /** Region to call Polly in; defaults to the caller's. Not every region offers every engine. */
+  region?: string;
   client?: Pick<PollyClient, "send">;
 }
 
 /** Amazon Polly with the neural (or generative) engine; MP3 at 24 kHz. */
 export function createPollySynthesizer(opts: PollyOptions): SpeechSynthesizer {
-  const client = opts.client ?? new PollyClient({});
+  const client = opts.client ?? new PollyClient(opts.region ? { region: opts.region } : {});
   return async (text) => {
     const out = await client.send(
       new SynthesizeSpeechCommand({
