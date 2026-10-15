@@ -3,6 +3,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { breadcrumb } from "../lib/debugLog";
+import { isMobileDevice } from "../lib/device";
 import type { TalkingHead } from "@met4citizen/talkinghead";
 import {
   createTalkingHeadSpeechAdapter,
@@ -25,7 +26,20 @@ const DEFAULT_AVATAR_URL = "/avatars/brunette.glb";
 // We load @met4citizen/talkinghead dynamically rather than importing it at
 // module scope: the library pulls in Three.js and touches `window` on
 // construction, which breaks SSR/test environments if imported eagerly.
-export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarContainer(_props, ref) {
+export interface AvatarContainerProps {
+  /** Hold off loading the avatar (e.g. while the voice model is starting on a phone). */
+  enabled?: boolean;
+  /** Never load the avatar (diagnostic mode). */
+  off?: boolean;
+  onReady?: () => void;
+}
+
+export const AvatarContainer = forwardRef<AvatarSpeechAdapter, AvatarContainerProps>(function AvatarContainer(
+  { enabled = true, off = false, onReady },
+  ref
+) {
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   const containerRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<TalkingHead | null>(null);
   const adapterRef = useRef<AvatarSpeechAdapter | null>(null);
@@ -38,6 +52,7 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
+    if (!enabled || off) return;
     let disposed = false;
 
     async function init() {
@@ -47,9 +62,17 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
         const { TalkingHead } = await import("@met4citizen/talkinghead");
 
         const head = new TalkingHead(containerRef.current, {
-          lipsyncModules: ["en"],
+          // The library would import() its lip-sync rules from a computed
+          // path, which the production bundle can't resolve (every load threw
+          // "Cannot find module './lipsync-en.mjs'"). Register them instead.
+          lipsyncModules: [],
           cameraView: "upper",
+          // The canvas is rendered at modelPixelRatio × devicePixelRatio (3x
+          // on iPhones) with antialiasing; render phones at a lower density.
+          ...(isMobileDevice() ? { modelPixelRatio: 0.6, modelFPS: 30 } : {}),
         });
+        const { LipsyncEn } = await import("@met4citizen/talkinghead/modules/lipsync-en.mjs");
+        head.lipsync.en = new LipsyncEn();
 
         breadcrumb("avatar: showAvatar start");
         await head.showAvatar({
@@ -65,6 +88,7 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
         breadcrumb("avatar: ready");
         headRef.current = head;
         setStatus("ready");
+        onReadyRef.current?.();
       } catch (err) {
         breadcrumb(`avatar: init failed ${String(err)}`);
         console.error("Failed to initialize TalkingHead avatar:", err);
@@ -83,14 +107,19 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
       headRef.current?.stop?.();
       headRef.current = null;
     };
-  }, []);
+  }, [enabled, off]);
 
   useImperativeHandle(ref, () => adapterRef.current!, []);
 
   return (
     <div className="relative h-full w-full overflow-hidden rounded-[32px] bg-gradient-to-b from-[#1c1c1e] to-black">
       <div ref={containerRef} className="h-full w-full" />
-      {status === "loading" && (
+      {off && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black px-6 text-center text-sm text-white/50">
+          Avatar disabled (diagnostic mode)
+        </div>
+      )}
+      {!off && status === "loading" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black text-white/60">
           <Loader2 className="h-7 w-7 animate-spin" />
           <p className="text-sm">Loading interviewer…</p>

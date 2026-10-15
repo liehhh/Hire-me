@@ -1,4 +1,6 @@
 import { breadcrumb } from "../../lib/debugLog";
+import { isMobileDevice } from "../../lib/device";
+import { beginKokoroAttempt, endKokoroAttempt, resetKokoroGuard } from "./kokoroGuard";
 import type {
   KokoroDevice,
   KokoroDtype,
@@ -36,13 +38,19 @@ interface PendingRequest {
   reject: (err: Error) => void;
 }
 
-/** ?tts=wasm|webgpu, ?dtype=q8|q4|fp16|..., ?warmup=0 */
-function readLoadOverrides(): KokoroLoadOptions {
+/**
+ * URL overrides: ?tts=wasm|webgpu, ?dtype=q8|q4|fp16|..., ?warmup=0.
+ * Without ?tts, phones use the WASM backend: on iPhone Safari the WebGPU
+ * path was observed to take the page down before the model finished loading.
+ */
+export function readLoadOverrides(): KokoroLoadOptions {
   if (typeof location === "undefined") return {};
   const params = new URLSearchParams(location.search);
   const overrides: KokoroLoadOptions = {};
   const tts = params.get("tts");
+  if (tts === "reset") resetKokoroGuard();
   if (tts === "wasm" || tts === "webgpu") overrides.device = tts;
+  else if (isMobileDevice()) overrides.device = "wasm";
   const dtype = params.get("dtype");
   if (dtype && ["fp32", "fp16", "q8", "q4", "q4f16"].includes(dtype)) overrides.dtype = dtype as KokoroDtype;
   if (params.get("warmup") === "0") overrides.skipWarmup = true;
@@ -75,7 +83,7 @@ export class KokoroClient {
   }
 
   /** Loads the model once; concurrent and repeated calls share one load. */
-  load(voice: string): Promise<void> {
+  load(voice: string, overrides: KokoroLoadOptions = readLoadOverrides()): Promise<void> {
     if (this.disposed) return Promise.reject(new Error("Kokoro client disposed."));
     if (this.status.modelState === "ready") return Promise.resolve();
     if (!this.loadPromise) {
@@ -84,8 +92,8 @@ export class KokoroClient {
       });
       this.setStatus({ modelState: "loading", progress: 0, error: null });
       // ?tts=wasm|webgpu forces a backend, for diagnosing device-specific crashes.
-      const overrides = readLoadOverrides();
       breadcrumb(`tts: load-model requested overrides=${JSON.stringify(overrides)}`);
+      beginKokoroAttempt();
       this.worker.postMessage({ type: "load-model", voice, ...overrides });
     }
     return this.loadPromise;
@@ -151,6 +159,7 @@ export class KokoroClient {
         break;
       case "audio":
         breadcrumb(`tts: chunk ${msg.chunkIndex} req=${msg.requestId} ${msg.duration.toFixed(1)}s`);
+        endKokoroAttempt(); // first audio produced: this device can run Kokoro
         // Stale chunks (from cancelled requests) have no pending entry.
         this.pending.get(msg.requestId)?.onChunk({
           chunkIndex: msg.chunkIndex,
@@ -176,6 +185,7 @@ export class KokoroClient {
   }
 
   private failLoad(err: Error) {
+    endKokoroAttempt(); // a catchable failure is not a page kill
     this.setStatus({ modelState: "error", progress: null, error: err.message });
     this.loadSettlers?.reject(err);
     this.loadSettlers = null;

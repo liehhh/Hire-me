@@ -17,5 +17,15 @@ declare module "@met4citizen/talkinghead" {
     ): { visemes: string[]; times: number[]; durations: number[] };
     stop(): void;
     isSpeaking: boolean;
+    /** Lip-sync processors by language, normally filled by `lipsyncModules`. */
+    lipsync: Record<string, unknown>;
+  }
+}
+
+// Imported statically (see AvatarContainer.tsx): the library's own
+// import(variablePath) cannot be resolved by the production bundle.
+declare module "@met4citizen/talkinghead/modules/lipsync-en.mjs" {
+  export class LipsyncEn {
+    constructor();
   }
 }

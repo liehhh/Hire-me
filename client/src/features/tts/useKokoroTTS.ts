@@ -142,6 +142,19 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
     };
   }, [ifMounted, interrupt]);
 
+  // iOS suspends audio and timers for a hidden page; pause the utterance (and
+  // with it the avatar's clock) instead of letting them drift, and continue
+  // when the page is visible again.
+  useEffect(() => {
+    const onVisibility = () => {
+      breadcrumb(`tts: visibility=${document.visibilityState}`);
+      if (document.visibilityState === "hidden") void playerRef.current?.pause();
+      else void playerRef.current?.resume();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
   const speak = useCallback(
     (text: string, callbacks: SpeakCallbacks = {}): Promise<SpeakOutcome> => {
       interrupt("cancel");
@@ -316,6 +329,8 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
     isGenerating,
     isSpeaking,
     isReady: status.modelState === "ready",
+    /** The model failed to load (a catchable error, not a page kill). */
+    modelFailed: status.modelState === "error",
     needsAudioUnlock,
     error,
     progress: status.progress,

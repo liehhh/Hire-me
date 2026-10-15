@@ -18,6 +18,7 @@ import {
   Keyboard,
 } from "lucide-react";
 import { breadcrumb } from "../lib/debugLog";
+import { isMobileDevice, urlFlag } from "../lib/device";
 import { AvatarContainer } from "./AvatarContainer";
 import { humanize } from "./InterviewPrep";
 import type { AvatarSpeechAdapter } from "../features/avatar/AvatarSpeechAdapter";
@@ -63,6 +64,12 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
   const avatarRef = useRef<AvatarSpeechAdapter>(null);
   const convo = useConversation({ analysis, avatar: avatarRef, onEnd });
   const { state, tts, voice } = convo;
+
+  // On phones the voice model and the 3D avatar are started one after the
+  // other, not together: the voice goes first and the avatar loads once it is
+  // ready (or has failed, or is switched off). ?avatar=0 disables the avatar.
+  const avatarOff = urlFlag("avatar") === "0";
+  const avatarEnabled = !isMobileDevice() || convo.voiceOff || tts.isReady || tts.modelFailed;
 
   const [micLevel, setMicLevel] = useState(0);
   const [isCameraOn, setIsCameraOn] = useState(false);
@@ -239,7 +246,7 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
 
       <div className="flex min-h-0 flex-1 gap-3 sm:gap-4">
         <div className="relative min-w-0 flex-1">
-          <AvatarContainer ref={avatarRef} />
+          <AvatarContainer ref={avatarRef} enabled={avatarEnabled} off={avatarOff} />
 
           <div className="absolute left-5 top-5 flex flex-col items-start gap-2">
             <span

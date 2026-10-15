@@ -1,12 +1,14 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, AlertTriangle, RotateCcw } from "lucide-react";
 import { SetupForm } from "./components/SetupForm";
 import { InterviewPrep } from "./components/InterviewPrep";
 import { CallRoom } from "./components/CallRoom";
 import { FeedbackDashboard } from "./components/FeedbackDashboard";
 import { ApiRequestError, interviewApi } from "./api/interviewApi";
+import { breadcrumb } from "./lib/debugLog";
+import { TtsDiagnostics } from "./components/TtsDiagnostics";
 import type { AnalyzeResponse, InterviewReport, TranscriptTurn } from "./types";
 
 interface FinishedInterview {
@@ -22,8 +24,46 @@ type View =
   | { name: "report-error"; finished: FinishedInterview; message: string; canRetry: boolean }
   | { name: "feedback"; report: InterviewReport };
 
+// The prepared interview survives the browser reloading the page (for example
+// when iOS terminates the tab): it returns to the prep screen rather than the
+// empty setup form. A call is restored as "prep" so the interview only starts
+// from a fresh tap, which also unlocks audio.
+const RESUME_KEY = "interview-resume";
+
+function persistView(view: View): void {
+  try {
+    if (view.name === "prep" || view.name === "call") {
+      sessionStorage.setItem(RESUME_KEY, JSON.stringify(view.analysis));
+    } else {
+      sessionStorage.removeItem(RESUME_KEY);
+    }
+  } catch {
+    // Storage unavailable: resume just won't work.
+  }
+}
+
 export default function App() {
-  const [view, setView] = useState<View>({ name: "setup" });
+  const [view, setViewState] = useState<View>({ name: "setup" });
+  const [diag, setDiag] = useState(false);
+  const setView = (next: View) => {
+    breadcrumb(`view: ${next.name}`);
+    persistView(next);
+    setViewState(next);
+  };
+
+  useEffect(() => {
+    setDiag(new URLSearchParams(location.search).get("diag") === "1");
+    try {
+      const saved = sessionStorage.getItem(RESUME_KEY);
+      if (saved) {
+        breadcrumb("view: restored prep screen after reload");
+        setViewState({ name: "prep", analysis: JSON.parse(saved) as AnalyzeResponse });
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // One report request at a time; the server also refuses to regenerate a
   // report unless asked to retry explicitly.
   const finishingRef = useRef(false);
@@ -47,6 +87,8 @@ export default function App() {
       finishingRef.current = false;
     }
   };
+
+  if (diag) return <TtsDiagnostics />;
 
   return (
     <main className="min-h-dvh">
