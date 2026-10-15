@@ -13,7 +13,8 @@ export interface KokoroEngine {
 }
 
 export type EngineLoader = (
-  onProgress: (progress: number) => void
+  onProgress: (progress: number) => void,
+  forcedDevice?: KokoroDevice
 ) => Promise<{ engine: KokoroEngine; device: KokoroDevice }>;
 
 export type PostFn = (message: TTSWorkerResponse, transfer?: Transferable[]) => void;
@@ -54,10 +55,10 @@ export function createKokoroWorkerHandler(loadEngine: EngineLoader, post: PostFn
   // request waits at most one sentence's inference time.
   let generationChain: Promise<void> = Promise.resolve();
 
-  const ensureLoaded = (): Promise<KokoroEngine> => {
+  const ensureLoaded = (forcedDevice?: KokoroDevice): Promise<KokoroEngine> => {
     if (!loadPromise) {
       post({ type: "loading", progress: 0 });
-      loadPromise = loadEngine((progress) => post({ type: "loading", progress })).then(
+      loadPromise = loadEngine((progress) => post({ type: "loading", progress }), forcedDevice).then(
         ({ engine, device }) => {
           post({ type: "ready", device });
           return engine;
@@ -107,7 +108,7 @@ export function createKokoroWorkerHandler(loadEngine: EngineLoader, post: PostFn
   return function handleMessage(req: TTSWorkerRequest): Promise<void> {
     switch (req.type) {
       case "load-model":
-        return ensureLoaded().then(
+        return ensureLoaded(req.device).then(
           () => undefined,
           (err) => post({ type: "error", message: errorMessage(err) })
         );

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
+import { breadcrumb } from "../../lib/debugLog";
 import { getAudioContext, SpeechPlayer, unlockAudio } from "./audioPlayback";
 import {
   acquireKokoroClient,
@@ -187,12 +188,16 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
           const ended = new Promise<void>((r) => (markEnded = r));
           player.begin(volume, {
             onStart: () => {
+              breadcrumb("audio: playback started");
               if (isStale()) return;
               setSpeaking(true);
               callbacks.onStart?.();
               optionsRef.current.onSpeechStart?.();
             },
-            onEnd: () => markEnded(),
+            onEnd: () => {
+              breadcrumb("audio: playback ended");
+              markEnded();
+            },
           });
 
           const play = (chunk: TTSAudioChunk) => {

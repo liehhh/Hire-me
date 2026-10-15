@@ -35,7 +35,7 @@ export type KokoroDevice = "webgpu" | "wasm";
 // sentence splitter), so playback can start before the full reply is ready.
 
 export type TTSWorkerRequest =
-  | { type: "load-model"; voice: string }
+  | { type: "load-model"; voice: string; device?: KokoroDevice }
   | { type: "synthesize"; requestId: number; text: string; voice: string; speed?: number }
   | { type: "cancel"; requestId?: number };
 

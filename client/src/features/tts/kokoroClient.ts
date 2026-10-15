@@ -1,3 +1,4 @@
+import { breadcrumb } from "../../lib/debugLog";
 import type {
   KokoroDevice,
   SynthesisOutcome,
@@ -66,7 +67,11 @@ export class KokoroClient {
         this.loadSettlers = { resolve, reject };
       });
       this.setStatus({ modelState: "loading", progress: 0, error: null });
-      this.worker.postMessage({ type: "load-model", voice });
+      // ?tts=wasm|webgpu forces a backend, for diagnosing device-specific crashes.
+      const forced = typeof location !== "undefined" ? new URLSearchParams(location.search).get("tts") : null;
+      const device = forced === "wasm" || forced === "webgpu" ? forced : undefined;
+      breadcrumb(`tts: load-model requested forced=${device ?? "auto"}`);
+      this.worker.postMessage(device ? { type: "load-model", voice, device } : { type: "load-model", voice });
     }
     return this.loadPromise;
   }
@@ -121,11 +126,13 @@ export class KokoroClient {
         this.setStatus({ modelState: "loading", progress: msg.progress ?? this.status.progress });
         break;
       case "ready":
+        breadcrumb(`tts: model ready device=${msg.device}`);
         this.setStatus({ modelState: "ready", progress: 100, device: msg.device, error: null });
         this.loadSettlers?.resolve();
         this.loadSettlers = null;
         break;
       case "audio":
+        breadcrumb(`tts: chunk ${msg.chunkIndex} req=${msg.requestId} ${msg.duration.toFixed(1)}s`);
         // Stale chunks (from cancelled requests) have no pending entry.
         this.pending.get(msg.requestId)?.onChunk({
           chunkIndex: msg.chunkIndex,
@@ -136,9 +143,11 @@ export class KokoroClient {
         });
         break;
       case "done":
+        breadcrumb(`tts: done req=${msg.requestId}`);
         this.settle(msg.requestId, "resolve", "completed");
         break;
       case "error":
+        breadcrumb(`tts: worker error ${msg.message}`);
         if (msg.requestId !== undefined) {
           this.settle(msg.requestId, "reject", new Error(msg.message));
         } else {

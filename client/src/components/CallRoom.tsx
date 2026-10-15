@@ -17,6 +17,7 @@ import {
   FileText,
   Keyboard,
 } from "lucide-react";
+import { breadcrumb } from "../lib/debugLog";
 import { AvatarContainer } from "./AvatarContainer";
 import { humanize } from "./InterviewPrep";
 import type { AvatarSpeechAdapter } from "../features/avatar/AvatarSpeechAdapter";
@@ -94,7 +95,9 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
 
     (async () => {
       try {
+        breadcrumb("mic: level meter getUserMedia");
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        breadcrumb("mic: level meter granted");
         if (disposed) {
           stream.getTracks().forEach((t) => t.stop());
           return;

@@ -27,12 +27,12 @@ async function hasWebGPU(): Promise<boolean> {
   }
 }
 
-async function loadEngine(onProgress: (progress: number) => void) {
+async function loadEngine(onProgress: (progress: number) => void, forcedDevice?: KokoroDevice) {
   const progress_callback = createProgressAggregator(onProgress);
   // kokoro-js recommends fp32 on WebGPU (lower precisions produce artifacts
   // there) and quantized q8 on the WASM backend (smaller, fast on CPU).
   // These are Kokoro's own execution backends — not a different TTS engine.
-  let device: KokoroDevice = (await hasWebGPU()) ? "webgpu" : "wasm";
+  let device: KokoroDevice = forcedDevice ?? ((await hasWebGPU()) ? "webgpu" : "wasm");
   let tts: KokoroTTS;
   try {
     tts = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {

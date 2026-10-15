@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { SITE_URL } from "./siteUrl";
+import { DebugOverlay } from "../components/DebugOverlay";
 
 
 const title = "InterviewerAI - AI Mock Interviews Tailored to the Job";
@@ -46,6 +47,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
         {children}
+        <DebugOverlay />
       </body>
     </html>
   );
