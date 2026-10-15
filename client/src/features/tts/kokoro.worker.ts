@@ -27,13 +27,23 @@ async function hasWebGPU(): Promise<boolean> {
   }
 }
 
+const log = (message: string) => self.postMessage({ type: "log", message });
+
 async function loadEngine(onProgress: (progress: number) => void, forcedDevice?: KokoroDevice) {
-  const progress_callback = createProgressAggregator(onProgress);
+  let lastLogged = -10;
+  const progress_callback = createProgressAggregator((percent) => {
+    onProgress(percent);
+    if (percent - lastLogged >= 10) {
+      lastLogged = percent;
+      log(`download ${percent}%`);
+    }
+  });
   // kokoro-js recommends fp32 on WebGPU (lower precisions produce artifacts
   // there) and quantized q8 on the WASM backend (smaller, fast on CPU).
   // These are Kokoro's own execution backends — not a different TTS engine.
   let device: KokoroDevice = forcedDevice ?? ((await hasWebGPU()) ? "webgpu" : "wasm");
   let tts: KokoroTTS;
+  log(`from_pretrained start device=${device}`);
   try {
     tts = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
       dtype: device === "webgpu" ? "fp32" : "q8",
@@ -50,14 +60,17 @@ async function loadEngine(onProgress: (progress: number) => void, forcedDevice?:
       progress_callback,
     });
   }
+  log(`from_pretrained done device=${device}`);
   // The first inference is much slower than later ones (WebGPU shader
   // compilation, WASM/ONNX initialisation). Pay that cost here, during
   // loading, instead of on the interviewer's first sentence.
+  log("warm-up start");
   try {
     await tts.generate("Hello.", { voice: DEFAULT_KOKORO_VOICE } as Parameters<KokoroTTS["generate"]>[1]);
   } catch {
     // Warm-up is only an optimisation.
   }
+  log("warm-up done");
   const engine: KokoroEngine = {
     stream(text, options) {
       // kokoro-js 1.2.1's stream(string) never closes its internal sentence

@@ -2,6 +2,7 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
+import { breadcrumb } from "../lib/debugLog";
 import type { TalkingHead } from "@met4citizen/talkinghead";
 import {
   createTalkingHeadSpeechAdapter,
@@ -42,6 +43,7 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
     async function init() {
       if (!containerRef.current) return;
       try {
+        breadcrumb("avatar: import talkinghead");
         const { TalkingHead } = await import("@met4citizen/talkinghead");
 
         const head = new TalkingHead(containerRef.current, {
@@ -49,6 +51,7 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
           cameraView: "upper",
         });
 
+        breadcrumb("avatar: showAvatar start");
         await head.showAvatar({
           url: DEFAULT_AVATAR_URL,
           body: "F",
@@ -59,9 +62,11 @@ export const AvatarContainer = forwardRef<AvatarSpeechAdapter>(function AvatarCo
           head.stop();
           return;
         }
+        breadcrumb("avatar: ready");
         headRef.current = head;
         setStatus("ready");
       } catch (err) {
+        breadcrumb(`avatar: init failed ${String(err)}`);
         console.error("Failed to initialize TalkingHead avatar:", err);
         if (!disposed) {
           setErrorMessage(err instanceof Error ? err.message : "Unknown error");

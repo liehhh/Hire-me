@@ -48,6 +48,7 @@ export class KokoroClient {
     this.worker = createWorker();
     this.worker.addEventListener("message", (event) => this.handleMessage(event.data));
     this.worker.addEventListener("error", (event) => {
+      breadcrumb(`tts: worker crashed event: ${event.message}`);
       this.failAll(new Error(event.message || "The Kokoro TTS worker crashed."));
     });
   }
@@ -121,6 +122,9 @@ export class KokoroClient {
 
   private handleMessage(msg: TTSWorkerResponse) {
     switch (msg.type) {
+      case "log":
+        breadcrumb(`worker: ${msg.message}`);
+        break;
       case "loading":
         if (!this.loadPromise) break; // stale progress after a failed load
         this.setStatus({ modelState: "loading", progress: msg.progress ?? this.status.progress });

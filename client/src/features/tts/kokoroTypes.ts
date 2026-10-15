@@ -41,6 +41,7 @@ export type TTSWorkerRequest =
 
 export type TTSWorkerResponse =
   | { type: "loading"; progress?: number }
+  | { type: "log"; message: string }
   | { type: "ready"; device: KokoroDevice }
   | {
       type: "audio";
