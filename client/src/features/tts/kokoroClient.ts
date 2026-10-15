@@ -1,6 +1,8 @@
 import { breadcrumb } from "../../lib/debugLog";
 import type {
   KokoroDevice,
+  KokoroDtype,
+  KokoroLoadOptions,
   SynthesisOutcome,
   TTSAudioChunk,
   TTSWorkerRequest,
@@ -32,6 +34,19 @@ interface PendingRequest {
   onChunk: (chunk: TTSAudioChunk) => void;
   resolve: (outcome: SynthesisOutcome) => void;
   reject: (err: Error) => void;
+}
+
+/** ?tts=wasm|webgpu, ?dtype=q8|q4|fp16|..., ?warmup=0 */
+function readLoadOverrides(): KokoroLoadOptions {
+  if (typeof location === "undefined") return {};
+  const params = new URLSearchParams(location.search);
+  const overrides: KokoroLoadOptions = {};
+  const tts = params.get("tts");
+  if (tts === "wasm" || tts === "webgpu") overrides.device = tts;
+  const dtype = params.get("dtype");
+  if (dtype && ["fp32", "fp16", "q8", "q4", "q4f16"].includes(dtype)) overrides.dtype = dtype as KokoroDtype;
+  if (params.get("warmup") === "0") overrides.skipWarmup = true;
+  return overrides;
 }
 
 export class KokoroClient {
@@ -69,10 +84,9 @@ export class KokoroClient {
       });
       this.setStatus({ modelState: "loading", progress: 0, error: null });
       // ?tts=wasm|webgpu forces a backend, for diagnosing device-specific crashes.
-      const forced = typeof location !== "undefined" ? new URLSearchParams(location.search).get("tts") : null;
-      const device = forced === "wasm" || forced === "webgpu" ? forced : undefined;
-      breadcrumb(`tts: load-model requested forced=${device ?? "auto"}`);
-      this.worker.postMessage(device ? { type: "load-model", voice, device } : { type: "load-model", voice });
+      const overrides = readLoadOverrides();
+      breadcrumb(`tts: load-model requested overrides=${JSON.stringify(overrides)}`);
+      this.worker.postMessage({ type: "load-model", voice, ...overrides });
     }
     return this.loadPromise;
   }

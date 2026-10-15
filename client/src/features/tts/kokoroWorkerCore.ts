@@ -1,4 +1,4 @@
-import type { KokoroDevice, TTSWorkerRequest, TTSWorkerResponse } from "./kokoroTypes";
+import type { KokoroDevice, KokoroLoadOptions, TTSWorkerRequest, TTSWorkerResponse } from "./kokoroTypes";
 
 // The worker's message-handling logic, kept free of `self`/kokoro-js imports
 // so it can be unit-tested with a fake engine. kokoro.worker.ts wires it to
@@ -14,7 +14,7 @@ export interface KokoroEngine {
 
 export type EngineLoader = (
   onProgress: (progress: number) => void,
-  forcedDevice?: KokoroDevice
+  options?: KokoroLoadOptions
 ) => Promise<{ engine: KokoroEngine; device: KokoroDevice }>;
 
 export type PostFn = (message: TTSWorkerResponse, transfer?: Transferable[]) => void;
@@ -55,10 +55,10 @@ export function createKokoroWorkerHandler(loadEngine: EngineLoader, post: PostFn
   // request waits at most one sentence's inference time.
   let generationChain: Promise<void> = Promise.resolve();
 
-  const ensureLoaded = (forcedDevice?: KokoroDevice): Promise<KokoroEngine> => {
+  const ensureLoaded = (options?: KokoroLoadOptions): Promise<KokoroEngine> => {
     if (!loadPromise) {
       post({ type: "loading", progress: 0 });
-      loadPromise = loadEngine((progress) => post({ type: "loading", progress }), forcedDevice).then(
+      loadPromise = loadEngine((progress) => post({ type: "loading", progress }), options).then(
         ({ engine, device }) => {
           post({ type: "ready", device });
           return engine;
@@ -108,7 +108,7 @@ export function createKokoroWorkerHandler(loadEngine: EngineLoader, post: PostFn
   return function handleMessage(req: TTSWorkerRequest): Promise<void> {
     switch (req.type) {
       case "load-model":
-        return ensureLoaded(req.device).then(
+        return ensureLoaded(req).then(
           () => undefined,
           (err) => post({ type: "error", message: errorMessage(err) })
         );

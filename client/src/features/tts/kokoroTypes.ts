@@ -27,6 +27,15 @@ export const DEFAULT_TTS_CONFIG: KokoroVoiceConfig = {
 };
 
 export type KokoroDevice = "webgpu" | "wasm";
+export type KokoroDtype = "fp32" | "fp16" | "q8" | "q4" | "q4f16";
+
+/** Optional load-time overrides (set via URL flags, for diagnosing device-specific crashes). */
+export interface KokoroLoadOptions {
+  device?: KokoroDevice;
+  dtype?: KokoroDtype;
+  /** Skip the throwaway first inference. */
+  skipWarmup?: boolean;
+}
 
 // --- Worker protocol -------------------------------------------------------
 // Every synthesize request carries a requestId so stale audio from a
@@ -35,7 +44,7 @@ export type KokoroDevice = "webgpu" | "wasm";
 // sentence splitter), so playback can start before the full reply is ready.
 
 export type TTSWorkerRequest =
-  | { type: "load-model"; voice: string; device?: KokoroDevice }
+  | ({ type: "load-model"; voice: string } & KokoroLoadOptions)
   | { type: "synthesize"; requestId: number; text: string; voice: string; speed?: number }
   | { type: "cancel"; requestId?: number };
 
