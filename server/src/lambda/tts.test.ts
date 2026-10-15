@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DynamoStore, type DocClient } from "../persistence/dynamoStore.js";
-import { createPollySynthesizer, type SpeechSynthesizer } from "../services/tts/ttsService.js";
+import { createDeepgramSynthesizer, type SpeechSynthesizer } from "../services/tts/ttsService.js";
 import { createLambdaApp, type UrlEvent } from "./app.js";
 
 /** In-memory stand-in for the DynamoDB counters (Update-ADD) the throttle uses. */
@@ -91,7 +91,7 @@ describe("POST /api/tts", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { post } = harness({
       synthesize: async () => {
-        throw new Error("AccessDenied: arn:aws:polly secret-detail");
+        throw new Error("Unauthorized: token secret-detail");
       },
     });
     const res = await post({ text: "Hello." });
@@ -101,22 +101,30 @@ describe("POST /api/tts", () => {
   });
 });
 
-describe("createPollySynthesizer", () => {
-  it("asks Polly for 24 kHz neural MP3 with the configured voice", async () => {
-    const send = vi.fn(async () => ({
-      AudioStream: { transformToByteArray: async () => AUDIO },
-      ContentType: "audio/mpeg",
-    }));
-    const synth = createPollySynthesizer({ voice: "Joanna", engine: "neural", client: { send } as never });
+describe("createDeepgramSynthesizer", () => {
+  const okResponse = () =>
+    new Response(AUDIO, { status: 200, headers: { "content-type": "audio/mpeg" } });
+
+  it("posts the text to Deepgram's MP3 endpoint with the key and model", async () => {
+    const fetchFn = vi.fn(async () => okResponse());
+    const synth = createDeepgramSynthesizer({ apiKey: "secret-key", model: "aura-2-thalia-en", fetchFn: fetchFn as never });
     await expect(synth("Hello.")).resolves.toEqual({ audio: AUDIO, mimeType: "audio/mpeg" });
-    const input = (send.mock.calls[0] as unknown as [{ input: Record<string, unknown> }])[0].input;
-    expect(input).toMatchObject({
-      Text: "Hello.",
-      TextType: "text",
-      OutputFormat: "mp3",
-      SampleRate: "24000",
-      VoiceId: "Joanna",
-      Engine: "neural",
-    });
+
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.deepgram.com/v1/speak?model=aura-2-thalia-en&encoding=mp3");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Token secret-key");
+    expect(JSON.parse(init.body as string)).toEqual({ text: "Hello." });
+  });
+
+  it("throws on a non-200 response, with the status but never the key", async () => {
+    const fetchFn = vi.fn(async () => new Response("quota exceeded", { status: 402 }));
+    const synth = createDeepgramSynthesizer({ apiKey: "secret-key", model: "m", fetchFn: fetchFn as never });
+    const err = await synth("Hello.").then(
+      () => null,
+      (e: Error) => e
+    );
+    expect(err?.message).toContain("402");
+    expect(err?.message).not.toContain("secret-key");
   });
 });

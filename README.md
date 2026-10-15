@@ -7,7 +7,7 @@ followed by a report based only on what you actually said.
 ```text
 Next.js (React) ──HTTP──▶ Node/Express ──▶ Gemini (server-side only)
    │
-   └─ voice: Amazon Polly via /api/tts ──▶ TalkingHead avatar lip-sync
+   └─ voice: Deepgram Aura via /api/tts ──▶ TalkingHead avatar lip-sync
 ```
 
 ## Setup
@@ -38,13 +38,14 @@ npm run dev               # Next.js on http://localhost:5173
 Voice input uses the Web Speech API (Chrome/Edge) with an on-device Whisper
 fallback; you can also type answers.
 
-The interviewer's voice is Amazon Polly (neural), synthesized by the server
-through `POST /api/tts` one sentence at a time and decoded in the browser, so
-it sounds the same on every device and nothing is downloaded. (An on-device
-model was tried first; its WASM/WebGPU runtime terminates the page on iOS
-Safari.) Polly needs the `polly:SynthesizeSpeech` permission (granted by
-`template.yaml`), and `TTS_CHARS_PER_DAY` caps what a deployment can spend.
-Running the server locally needs AWS credentials and a region for Polly.
+The interviewer's voice is Deepgram Aura, synthesized by the server through
+`POST /api/tts` one sentence at a time and decoded in the browser, so it sounds
+the same on every device and nothing is downloaded. (An on-device model was
+tried first; its WASM/WebGPU runtime terminates the page on iOS Safari.) The
+API key lives in SSM Parameter Store (`DeepgramApiKeyParameter` in
+`template.yaml`) or, locally, in `DEEPGRAM_API_KEY`; `TTS_CHARS_PER_DAY` caps
+what a deployment can spend. If the voice service is unavailable or its budget
+is used up, the browser's built-in voice takes over so the interview continues.
 
 ### Tests
 

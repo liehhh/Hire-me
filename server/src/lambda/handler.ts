@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import type { UrlEvent, UrlResult } from "./app.js";
-import { createPollySynthesizer } from "../services/tts/ttsService.js";
+import { createDeepgramSynthesizer } from "../services/tts/ttsService.js";
 
 // Entry point for AWS Lambda (Function URL). The Gemini key lives in SSM
 // Parameter Store, not in the function's environment: it is fetched once per
@@ -19,8 +19,23 @@ async function loadGeminiKey() {
   process.env.GEMINI_API_KEY = value;
 }
 
+/** The voice key is optional: without it the app runs and /api/tts answers 404 (the browser then uses its own voice). */
+async function loadDeepgramKey() {
+  if (process.env.DEEPGRAM_API_KEY) return;
+  const name = process.env.DEEPGRAM_API_KEY_PARAMETER;
+  if (!name) return;
+  try {
+    const out = await new SSMClient({}).send(new GetParameterCommand({ Name: name, WithDecryption: true }));
+    if (out.Parameter?.Value) process.env.DEEPGRAM_API_KEY = out.Parameter.Value;
+    else console.error(`[tts] SSM parameter ${name} is empty; the cloud voice is disabled.`);
+  } catch (err) {
+    console.error(`[tts] could not read SSM parameter ${name}; the cloud voice is disabled:`, err);
+  }
+}
+
 async function init() {
   await loadGeminiKey();
+  await loadDeepgramKey();
   const [{ config, LIMITS }, { generateStructured }, { InterviewService }, { SessionStore }, { DynamoStore }, { createLambdaApp }] =
     await Promise.all([
       import("../config.js"),
@@ -33,9 +48,10 @@ async function init() {
 
   const store = new SessionStore();
   return createLambdaApp({
-    tts: config.ttsEnabled
+    tts:
+      config.ttsEnabled && config.deepgramApiKey
       ? {
-          synthesize: createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine, region: config.pollyRegion || undefined }),
+          synthesize: createDeepgramSynthesizer({ apiKey: config.deepgramApiKey, model: config.deepgramModel }),
           charsPerDay: config.ttsCharsPerDay,
           requestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
         }

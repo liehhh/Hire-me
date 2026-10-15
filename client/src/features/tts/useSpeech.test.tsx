@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
 import { CloudSpeechClient, type FetchAudio } from "./cloudSpeech";
 import { FakeAudioContext, SAMPLE_RATE, tone } from "./testUtils";
@@ -147,6 +147,84 @@ describe("useSpeech", () => {
     await expect(retried).resolves.toBe("error"); // same text, same failure
     consoleSpy.mockRestore();
     unmount();
+  });
+
+  describe("with the browser voice available", () => {
+    const utterances: Array<{ text: string; onstart?: () => void; onend?: () => void }> = [];
+
+    const installBrowserVoice = () => {
+      class Utterance {
+        lang = "";
+        volume = 1;
+        voice = null;
+        onstart: (() => void) | undefined;
+        onend: (() => void) | undefined;
+        onerror: (() => void) | undefined;
+        constructor(public text: string) {
+          utterances.push(this);
+        }
+      }
+      const synth = { speak: vi.fn(), cancel: vi.fn(), getVoices: () => [] };
+      vi.stubGlobal("SpeechSynthesisUtterance", Utterance);
+      Object.defineProperty(window, "speechSynthesis", { value: synth, configurable: true });
+      return synth;
+    };
+
+    afterEach(() => {
+      utterances.length = 0;
+      vi.unstubAllGlobals();
+      // @ts-expect-error cleanup of the test double
+      delete window.speechSynthesis;
+    });
+
+    it("speaks the line with the browser voice when the cloud voice fails before any audio", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const synth = installBrowserVoice();
+      const { result, unmount } = setup({
+        fetchAudio: async () => {
+          throw new Error("daily budget used up");
+        },
+      });
+      const events: string[] = [];
+      let p!: Promise<string>;
+      act(() => {
+        p = result.current.speak("Please tell me about a hard problem you solved recently.", {
+          onStart: () => events.push("speaking"),
+          onEnd: () => events.push("idle"),
+          onError: () => events.push("error"),
+        });
+      });
+
+      await waitFor(() => expect(synth.speak).toHaveBeenCalled());
+      expect(result.current.error).toBeNull(); // not surfaced as a failure
+      act(() => utterances[0].onstart?.());
+      await waitFor(() => expect(result.current.isSpeaking).toBe(true));
+      expect(result.current.usingBackupVoice).toBe(true);
+
+      act(() => utterances[utterances.length - 1].onend?.());
+      await expect(p).resolves.toBe("completed");
+      expect(events).toEqual(["speaking", "idle"]);
+      await waitFor(() => expect(result.current.isSpeaking).toBe(false));
+      unmount();
+    });
+
+    it("stop() silences the browser voice too", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const synth = installBrowserVoice();
+      const { result, unmount } = setup({
+        fetchAudio: async () => {
+          throw new Error("down");
+        },
+      });
+      act(() => {
+        void result.current.speak("Please tell me about a hard problem you solved recently.");
+      });
+      await waitFor(() => expect(synth.speak).toHaveBeenCalled());
+      synth.cancel.mockClear();
+      act(() => result.current.cancel());
+      expect(synth.cancel).toHaveBeenCalled();
+      unmount();
+    });
   });
 
   it("cleans up on unmount: silences the audio and stops requesting more", async () => {

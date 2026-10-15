@@ -419,7 +419,7 @@ export type ApiErrorCode =
   | "INTERNAL_ERROR";
 
 // --- POST /api/tts -----------------------------------------------------------
-// The interviewer's voice: text in, audio out (Amazon Polly).
+// The interviewer's voice: text in, audio out (Deepgram Aura).
 
 export interface TtsRequest {
   /** One sentence or short passage of plain text. */

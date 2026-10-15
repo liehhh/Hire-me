@@ -22,13 +22,11 @@ export const config = {
   /** Global Gemini request budget for this process. 0 disables the daily cap. */
   geminiRequestsPerMinute: intEnv("GEMINI_RPM", 8),
   geminiRequestsPerDay: intEnv("GEMINI_RPD", 0),
-  /** Cloud voice (Amazon Polly) that speaks the interviewer's lines. */
+  /** The interviewer's voice (Deepgram Aura). Disabled when there is no key. */
   ttsEnabled: (process.env.TTS_ENABLED ?? "true").toLowerCase() !== "false",
-  pollyVoice: (process.env.POLLY_VOICE ?? "Joanna").trim(),
-  pollyEngine: (process.env.POLLY_ENGINE ?? "neural").trim(),
-  /** Empty = the Lambda's own region. Set it when that region lacks the neural engine (e.g. us-east-1, eu-west-1). */
-  pollyRegion: (process.env.POLLY_REGION ?? "").trim(),
-  /** Whole-deployment daily cap on characters sent to Polly. 0 disables the cap. */
+  deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? "",
+  deepgramModel: (process.env.DEEPGRAM_MODEL ?? "aura-2-thalia-en").trim(),
+  /** Whole-deployment daily cap on characters sent to the voice service. 0 disables the cap. */
   ttsCharsPerDay: intEnv("TTS_CHARS_PER_DAY", 50_000),
 };
 

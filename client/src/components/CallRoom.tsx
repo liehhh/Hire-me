@@ -167,6 +167,7 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
   };
 
   const voiceStatus = state === "ai_speaking" && !tts.isSpeaking ? "Generating speech…" : null;
+  const showBackupVoice = state === "ai_speaking" && tts.usingBackupVoice && tts.isSpeaking;
 
   const recordedMs = convo.answerStartedAt ? now - convo.answerStartedAt : 0;
   const plan = analysis.interviewBlueprint;
@@ -256,6 +257,12 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
                     : state === "processing_answer"
                       ? "Reviewing your answer…"
                       : "Preparing the response…")}
+              </span>
+            )}
+            {showBackupVoice && (
+              <span className="flex items-center gap-2 rounded-full bg-black/40 px-4 py-1.5 text-sm text-white/70 backdrop-blur-2xl">
+                <Volume2 className="h-3.5 w-3.5" />
+                Using your device&apos;s voice
               </span>
             )}
           </div>

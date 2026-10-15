@@ -24,20 +24,15 @@ Parameters:
     Type: Number
     Default: 50000
     MinValue: 0
-    Description: Whole-deployment daily cap on characters sent to Amazon Polly (an interview speaks roughly 3-12K). 0 disables the cap.
-  PollyVoice:
+    Description: Whole-deployment daily cap on characters sent to the voice service (an interview speaks roughly 3-12K). 0 disables the cap.
+  DeepgramApiKeyParameter:
     Type: String
-    Default: Joanna
-    Description: Polly voice id for the interviewer on devices that can't run the on-device voice.
-  PollyRegion:
+    Default: /interviewerai/deepgram-api-key
+    Description: Name of an existing SSM SecureString parameter that holds the Deepgram API key (create it yourself). Without it the cloud voice is off.
+  DeepgramModel:
     Type: String
-    Default: ""
-    Description: Region to call Polly in. Leave empty to use the stack's region; set it (e.g. us-east-1 or eu-west-1) if that region has no neural voices.
-  PollyEngine:
-    Type: String
-    Default: neural
-    AllowedValues: [neural, generative]
-    Description: neural has the larger Polly free tier; generative sounds more natural but costs more per character.
+    Default: aura-2-thalia-en
+    Description: Deepgram Aura voice model for the interviewer.
 
 Globals:
   Function:
@@ -87,9 +82,8 @@ Resources:
           GEMINI_MODEL: !Ref GeminiModel
           GEMINI_RPD: !Ref GeminiCallsPerDay
           TTS_CHARS_PER_DAY: !Ref TtsCharsPerDay
-          POLLY_VOICE: !Ref PollyVoice
-          POLLY_ENGINE: !Ref PollyEngine
-          POLLY_REGION: !Ref PollyRegion
+          DEEPGRAM_API_KEY_PARAMETER: !Ref DeepgramApiKeyParameter
+          DEEPGRAM_MODEL: !Ref DeepgramModel
           NODE_OPTIONS: --enable-source-maps
       Policies:
         - DynamoDBCrudPolicy:
@@ -100,8 +94,8 @@ Resources:
               Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GeminiApiKeyParameter}
         - Statement:
             - Effect: Allow
-              Action: polly:SynthesizeSpeech
-              Resource: "*"
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DeepgramApiKeyParameter}
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: BUFFERED

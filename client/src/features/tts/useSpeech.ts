@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
 import { breadcrumb } from "../../lib/debugLog";
 import { getAudioContext, SpeechPlayer, unlockAudio } from "./audioPlayback";
+import { browserVoiceAvailable, speakWithBrowserVoice } from "./browserVoice";
 import { getCloudSpeechClient, type CloudSpeechClient } from "./cloudSpeech";
 import { PrebufferGate } from "./prebufferGate";
 import { DEFAULT_SPEECH_CONFIG, type SpeechConfig, type TTSAudioChunk } from "./ttsTypes";
@@ -56,11 +57,13 @@ export function useSpeech(options: UseSpeechOptions = {}) {
   const tokenRef = useRef(0);
   const speakingRef = useRef(false);
   const lastRequestRef = useRef<{ text: string; callbacks: SpeakCallbacks } | null>(null);
+  const backupVoiceRef = useRef<{ cancel: () => void } | null>(null);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+  const [usingBackupVoice, setUsingBackupVoice] = useState(false);
 
   // Guards every state update so late network/audio events can't touch an
   // unmounted component.
@@ -84,6 +87,8 @@ export function useSpeech(options: UseSpeechOptions = {}) {
       activeRef.current = null;
       tokenRef.current++;
       clientRef.current?.cancel();
+      backupVoiceRef.current?.cancel();
+      backupVoiceRef.current = null;
       playerRef.current?.stop();
       optionsRef.current.avatar?.current?.cancel();
       speakingRef.current = false;
@@ -147,6 +152,7 @@ export function useSpeech(options: UseSpeechOptions = {}) {
 
       return new Promise<SpeakOutcome>((resolve) => {
         let settled = false;
+        let playbackStarted = false;
         const finish = (outcome: SpeakOutcome) => {
           if (settled) return;
           settled = true;
@@ -158,6 +164,7 @@ export function useSpeech(options: UseSpeechOptions = {}) {
           ifMounted(() => {
             setError(null);
             setIsGenerating(true);
+            setUsingBackupVoice(false);
           });
           callbacks.onGenerating?.();
 
@@ -172,6 +179,7 @@ export function useSpeech(options: UseSpeechOptions = {}) {
           player.begin(volume, {
             onStart: () => {
               breadcrumb("audio: playback started");
+              playbackStarted = true;
               if (isStale()) return;
               setSpeaking(true);
               callbacks.onStart?.();
@@ -229,22 +237,57 @@ export function useSpeech(options: UseSpeechOptions = {}) {
         })().catch((err: unknown) => {
           if (isStale()) return;
           const error = err instanceof Error ? err : new Error(String(err));
-          activeRef.current = null;
-          tokenRef.current++;
           clientRef.current?.cancel();
           player.stop();
           optionsRef.current.avatar?.current?.cancel();
-          speakingRef.current = false;
-          ifMounted(() => {
-            setIsGenerating(false);
-            setIsSpeaking(false);
-            setError(SPEECH_ERROR_MESSAGE);
-          });
           breadcrumb(`speech: error ${error.message}`);
           if (process.env.NODE_ENV !== "production") console.error("[speech] generation failed:", error);
-          callbacks.onError?.(error);
-          optionsRef.current.onSpeechError?.(error);
-          finish("error");
+
+          const fail = (cause: Error) => {
+            activeRef.current = null;
+            tokenRef.current++;
+            backupVoiceRef.current = null;
+            speakingRef.current = false;
+            ifMounted(() => {
+              setIsGenerating(false);
+              setIsSpeaking(false);
+              setError(SPEECH_ERROR_MESSAGE);
+            });
+            callbacks.onError?.(cause);
+            optionsRef.current.onSpeechError?.(cause);
+            finish("error");
+          };
+
+          // Nothing has been heard yet, so the browser's own voice can say the
+          // whole line without repeating anything. The avatar cannot lip-sync to it.
+          if (!playbackStarted && browserVoiceAvailable()) {
+            breadcrumb("speech: using the browser voice instead");
+            ifMounted(() => setUsingBackupVoice(true));
+            backupVoiceRef.current = speakWithBrowserVoice(trimmed, {
+              volume,
+              onStart: () => {
+                if (isStale()) return;
+                ifMounted(() => setIsGenerating(false));
+                setSpeaking(true);
+                callbacks.onStart?.();
+                optionsRef.current.onSpeechStart?.();
+              },
+              onEnd: () => {
+                if (isStale()) return;
+                backupVoiceRef.current = null;
+                activeRef.current = null;
+                setSpeaking(false);
+                callbacks.onEnd?.();
+                optionsRef.current.onSpeechEnd?.();
+                finish("completed");
+              },
+              onError: (backupError) => {
+                if (!isStale()) fail(backupError);
+              },
+            });
+            return;
+          }
+          fail(error);
         });
       });
     },
@@ -286,6 +329,8 @@ export function useSpeech(options: UseSpeechOptions = {}) {
     isGenerating,
     isSpeaking,
     needsAudioUnlock,
+    /** The cloud voice failed, so the browser's own voice is speaking (no lip-sync). */
+    usingBackupVoice,
     error,
   };
 }

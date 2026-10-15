@@ -6,7 +6,7 @@ import { SessionStore } from "./interview/session.js";
 import { errorHandler, interviewRouter } from "./routes/interview.js";
 import { generateStructured, verifyGeminiModel } from "./services/gemini/geminiClient.js";
 import { ipRateLimit } from "./services/rateLimiter.js";
-import { createPollySynthesizer, speak } from "./services/tts/ttsService.js";
+import { createDeepgramSynthesizer, speak } from "./services/tts/ttsService.js";
 
 // React -> this server -> Gemini. The browser never sees the Gemini key or
 // prompts; it only receives validated, structured results.
@@ -50,9 +50,9 @@ async function main() {
   const service = new InterviewService(generateStructured, store);
 
   app.use("/api/interview", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), interviewRouter(service));
-  // Cloud voice (needs AWS credentials locally).
-  if (config.ttsEnabled) {
-    const synthesize = createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine, region: config.pollyRegion || undefined });
+  // The interviewer's voice (needs DEEPGRAM_API_KEY).
+  if (config.ttsEnabled && config.deepgramApiKey) {
+    const synthesize = createDeepgramSynthesizer({ apiKey: config.deepgramApiKey, model: config.deepgramModel });
     app.post("/api/tts", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), (req, res, next) => {
       speak(synthesize, req.body)
         .then((body) => res.json(body))
