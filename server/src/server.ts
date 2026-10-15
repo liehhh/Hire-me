@@ -6,6 +6,7 @@ import { SessionStore } from "./interview/session.js";
 import { errorHandler, interviewRouter } from "./routes/interview.js";
 import { generateStructured, verifyGeminiModel } from "./services/gemini/geminiClient.js";
 import { ipRateLimit } from "./services/rateLimiter.js";
+import { createPollySynthesizer, speak } from "./services/tts/ttsService.js";
 
 // React -> this server -> Gemini. The browser never sees the Gemini key or
 // prompts; it only receives validated, structured results.
@@ -49,6 +50,15 @@ async function main() {
   const service = new InterviewService(generateStructured, store);
 
   app.use("/api/interview", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), interviewRouter(service));
+  // Cloud voice (needs AWS credentials locally; phones use it, desktops use Kokoro).
+  if (config.ttsEnabled) {
+    const synthesize = createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine });
+    app.post("/api/tts", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), (req, res, next) => {
+      speak(synthesize, req.body)
+        .then((body) => res.json(body))
+        .catch(next);
+    });
+  }
   app.use(errorHandler);
 
   app.listen(config.port, () => {

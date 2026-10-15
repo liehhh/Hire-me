@@ -9,6 +9,8 @@ import type {
   RespondResponse,
   StartRequest,
   StartResponse,
+  TtsRequest,
+  TtsResponse,
 } from "../types";
 
 // Thin typed client for the InterviewerAI backend. The browser only ever
@@ -32,10 +34,10 @@ export class ApiRequestError extends Error {
 
 export const isCancelled = (err: unknown) => err instanceof ApiRequestError && err.code === "CANCELLED";
 
-async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+async function postTo<T>(route: string, body: unknown, signal?: AbortSignal): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${SERVER_URL}/api/interview/${path}`, {
+    res = await fetch(`${SERVER_URL}${route}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -60,9 +62,14 @@ async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promi
   return (await res.json()) as T;
 }
 
+const post = <T>(path: string, body: unknown, signal?: AbortSignal) =>
+  postTo<T>(`/api/interview/${path}`, body, signal);
+
 export const interviewApi = {
   analyze: (body: AnalyzeRequest, signal?: AbortSignal) => post<AnalyzeResponse>("analyze", body, signal),
   start: (body: StartRequest, signal?: AbortSignal) => post<StartResponse>("start", body, signal),
   respond: (body: RespondRequest, signal?: AbortSignal) => post<RespondResponse>("respond", body, signal),
   finish: (body: FinishRequest, signal?: AbortSignal) => post<FinishResponse>("finish", body, signal),
+  /** Cloud voice: one sentence in, base64 MP3 out. */
+  speech: (body: TtsRequest, signal?: AbortSignal) => postTo<TtsResponse>("/api/tts", body, signal),
 };

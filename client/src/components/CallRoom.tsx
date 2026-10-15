@@ -65,11 +65,11 @@ export function CallRoom({ analysis, onEnd }: CallRoomProps) {
   const convo = useConversation({ analysis, avatar: avatarRef, onEnd });
   const { state, tts, voice } = convo;
 
-  // On phones the voice model and the 3D avatar are started one after the
-  // other, not together: the voice goes first and the avatar loads once it is
-  // ready (or has failed, or is switched off). ?avatar=0 disables the avatar.
+  // If Kokoro is forced on a phone, its model and the 3D avatar start one
+  // after the other, not together. The cloud voice has nothing to load, so the
+  // avatar starts at once. ?avatar=0 disables the avatar (diagnostics).
   const avatarOff = urlFlag("avatar") === "0";
-  const avatarEnabled = !isMobileDevice() || convo.voiceOff || tts.isReady || tts.modelFailed;
+  const avatarEnabled = tts.engine === "cloud" || !isMobileDevice() || tts.isReady || tts.modelFailed;
 
   const [micLevel, setMicLevel] = useState(0);
   const [isCameraOn, setIsCameraOn] = useState(false);

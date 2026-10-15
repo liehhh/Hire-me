@@ -418,6 +418,23 @@ export type ApiErrorCode =
   | "CANCELLED"
   | "INTERNAL_ERROR";
 
+// --- POST /api/tts -----------------------------------------------------------
+// Cloud speech for devices that can't run the on-device voice model (phones).
+
+export interface TtsRequest {
+  /** One sentence or short passage of plain text. */
+  text: string;
+}
+
+export interface TtsResponse {
+  /** Base64-encoded audio. */
+  audio: string;
+  /** e.g. "audio/mpeg" */
+  mimeType: string;
+  /** Characters billed for this request. */
+  characters: number;
+}
+
 export interface ApiErrorBody {
   error: {
     code: ApiErrorCode;

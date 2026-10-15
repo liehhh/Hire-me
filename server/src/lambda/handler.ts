@@ -2,6 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import type { UrlEvent, UrlResult } from "./app.js";
+import { createPollySynthesizer } from "../services/tts/ttsService.js";
 
 // Entry point for AWS Lambda (Function URL). The Gemini key lives in SSM
 // Parameter Store, not in the function's environment: it is fetched once per
@@ -32,6 +33,13 @@ async function init() {
 
   const store = new SessionStore();
   return createLambdaApp({
+    tts: config.ttsEnabled
+      ? {
+          synthesize: createPollySynthesizer({ voice: config.pollyVoice, engine: config.pollyEngine }),
+          charsPerDay: config.ttsCharsPerDay,
+          requestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
+        }
+      : undefined,
     service: new InterviewService(generateStructured, store),
     store,
     db: new DynamoStore(DynamoDBDocumentClient.from(new DynamoDBClient({})), process.env.TABLE_NAME ?? "InterviewerAI"),

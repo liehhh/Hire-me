@@ -22,6 +22,12 @@ export const config = {
   /** Global Gemini request budget for this process. 0 disables the daily cap. */
   geminiRequestsPerMinute: intEnv("GEMINI_RPM", 8),
   geminiRequestsPerDay: intEnv("GEMINI_RPD", 0),
+  /** Cloud voice (Amazon Polly) for devices that can't run Kokoro. */
+  ttsEnabled: (process.env.TTS_ENABLED ?? "true").toLowerCase() !== "false",
+  pollyVoice: (process.env.POLLY_VOICE ?? "Joanna").trim(),
+  pollyEngine: (process.env.POLLY_ENGINE ?? "neural").trim(),
+  /** Whole-deployment daily cap on characters sent to Polly. 0 disables the cap. */
+  ttsCharsPerDay: intEnv("TTS_CHARS_PER_DAY", 50_000),
 };
 
 // Hard limits protecting the Gemini free tier. Every Gemini call and every

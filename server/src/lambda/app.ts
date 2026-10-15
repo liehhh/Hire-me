@@ -9,6 +9,7 @@ import type { SessionStore } from "../interview/session.js";
 import type { DynamoStore } from "../persistence/dynamoStore.js";
 import { errorBody, toAppError } from "../routes/apiErrors.js";
 import { AppError } from "../services/gemini/geminiErrors.js";
+import { speak, ttsRequestSchema, type SpeechSynthesizer } from "../services/tts/ttsService.js";
 
 /** The subset of a Lambda Function URL (payload v2) event this app reads. */
 export interface UrlEvent {
@@ -37,6 +38,13 @@ export interface LambdaAppOptions {
   /** Longest wait for answer evaluations that finish after the reply. */
   flushWaitMs: number;
   maxBodyBytes?: number;
+  /** Cloud voice. Omit to answer /api/tts with 404. */
+  tts?: {
+    synthesize: SpeechSynthesizer;
+    /** Characters per UTC day for the whole deployment; 0 = unlimited. */
+    charsPerDay: number;
+    requestsPerMinutePerIp: number;
+  };
 }
 
 /** Approximate Gemini calls each route spends, for the daily budget. */
@@ -80,6 +88,33 @@ export function createLambdaApp(opts: LambdaAppOptions) {
       if (err instanceof AppError) throw err;
       // A counter outage must not take the app down; the Gemini client still enforces its own limits.
       console.warn("[rate-limit] counter unavailable, allowing request:", err);
+    }
+  }
+
+  /** Per-IP request rate plus a whole-deployment daily character budget (the voice is billed per character). */
+  async function throttleTts(ip: string, characters: number) {
+    const tts = opts.tts;
+    if (!tts) return;
+    try {
+      const perIp = await db.incrementCounter(`tts-ip#${ip}`, 60, 1);
+      if (perIp.total > tts.requestsPerMinutePerIp) {
+        throw new AppError("RATE_LIMITED", "Too many requests. Please slow down.", 429, true, perIp.retryAfterSeconds);
+      }
+      if (tts.charsPerDay > 0) {
+        const day = await db.incrementCounter("tts-chars-day", 86_400, characters);
+        if (day.total > tts.charsPerDay) {
+          throw new AppError(
+            "RATE_LIMITED",
+            "The daily voice budget for this app is used up. Continue in text mode or try again tomorrow.",
+            429,
+            false,
+            day.retryAfterSeconds
+          );
+        }
+      }
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.warn("[rate-limit] tts counter unavailable, allowing request:", err);
     }
   }
 
@@ -146,6 +181,16 @@ export function createLambdaApp(opts: LambdaAppOptions) {
     const path = event.rawPath.replace(/\/+$/, "");
     try {
       if (method === "GET" && path === "/api/health") return json(200, { ok: true, model: opts.model });
+
+      if (method === "POST" && path === "/api/tts") {
+        if (!opts.tts) throw new AppError("VALIDATION_ERROR", "Not found.", 404);
+        const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
+        if (Buffer.byteLength(raw) > 8 * 1024) throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
+        const body: unknown = raw ? JSON.parse(raw) : {};
+        const { text } = ttsRequestSchema.parse(body);
+        await throttleTts(sourceIp ?? "unknown", text.length);
+        return json(200, await speak(opts.tts.synthesize, body));
+      }
 
       const match = /^\/api\/interview\/(analyze|start|respond|finish)$/.exec(path);
       if (method !== "POST" || !match) throw new AppError("VALIDATION_ERROR", "Not found.", 404);

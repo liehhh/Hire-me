@@ -20,6 +20,21 @@ Parameters:
     MinValue: 0
     Description: Whole-deployment daily cap on Gemini calls (an interview is roughly 15-40). 0 disables the cap. This is your protection against strangers spending your Gemini quota.
 
+  TtsCharsPerDay:
+    Type: Number
+    Default: 50000
+    MinValue: 0
+    Description: Whole-deployment daily cap on characters sent to Amazon Polly (an interview speaks roughly 3-12K). 0 disables the cap.
+  PollyVoice:
+    Type: String
+    Default: Joanna
+    Description: Polly voice id for the interviewer on devices that can't run the on-device voice.
+  PollyEngine:
+    Type: String
+    Default: neural
+    AllowedValues: [neural, generative]
+    Description: neural has the larger Polly free tier; generative sounds more natural but costs more per character.
+
 Globals:
   Function:
     Runtime: nodejs22.x
@@ -67,6 +82,9 @@ Resources:
           GEMINI_API_KEY_PARAMETER: !Ref GeminiApiKeyParameter
           GEMINI_MODEL: !Ref GeminiModel
           GEMINI_RPD: !Ref GeminiCallsPerDay
+          TTS_CHARS_PER_DAY: !Ref TtsCharsPerDay
+          POLLY_VOICE: !Ref PollyVoice
+          POLLY_ENGINE: !Ref PollyEngine
           NODE_OPTIONS: --enable-source-maps
       Policies:
         - DynamoDBCrudPolicy:
@@ -75,6 +93,10 @@ Resources:
             - Effect: Allow
               Action: ssm:GetParameter
               Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GeminiApiKeyParameter}
+        - Statement:
+            - Effect: Allow
+              Action: polly:SynthesizeSpeech
+              Resource: "*"
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: BUFFERED

@@ -2,8 +2,6 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import { ApiRequestError, interviewApi, isCancelled } from "../../api/interviewApi";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
-import { breadcrumb } from "../../lib/debugLog";
-import { isKokoroUnsafe } from "../tts/kokoroGuard";
 import { useKokoroTTS } from "../tts/useKokoroTTS";
 import type {
   AnalyzeResponse,
@@ -131,10 +129,7 @@ export function useConversation(options: {
   const [answerStartedAt, setAnswerStartedAt] = useState<number | null>(null);
 
   const tts = useKokoroTTS({ avatar: options.avatar });
-  // A previous page died while Kokoro was starting on this device: skip
-  // on-device voice (the interview continues as text) rather than crash again.
-  const voiceOffRef = useRef(false);
-  const [voiceOff, setVoiceOff] = useState(false);
+
 
   // --- timers ------------------------------------------------------------------
   const clearSilenceTimer = () => {
@@ -258,18 +253,6 @@ export function useConversation(options: {
     pendingSpeechRef.current = speech;
     const token = ++speechTokenRef.current;
 
-    if (voiceOffRef.current) {
-      pendingSpeechRef.current = null;
-      breadcrumb("conversation: voice off, continuing as text");
-      if (speech.then === "finish") {
-        if (machine.transition("finished")) complete();
-        return;
-      }
-      openCandidateTurn(true);
-      setNotice("Voice isn't available on this device, so the interviewer's questions appear as text. Answer by speaking or typing.");
-      return;
-    }
-
     const outcome = await tts.speak(speech.text);
     if (token !== speechTokenRef.current || !machine.is("ai_speaking")) return; // ended meanwhile
 
@@ -338,13 +321,7 @@ export function useConversation(options: {
     mountedRef.current = true;
     if (!startedRef.current) {
       startedRef.current = true;
-      if (isKokoroUnsafe()) {
-        voiceOffRef.current = true;
-        setVoiceOff(true);
-        breadcrumb("conversation: Kokoro disabled (previous page died during voice startup)");
-      } else {
-        tts.preload();
-      }
+      tts.preload();
       void runStart();
     }
     return () => {
@@ -531,7 +508,6 @@ export function useConversation(options: {
     error,
     answerStartedAt,
     tts,
-    voiceOff,
     voice,
     finishAnswer: () => void finishCandidateAnswer("manual"),
     submitTypedAnswer,

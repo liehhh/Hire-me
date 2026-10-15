@@ -2,13 +2,8 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
 import { breadcrumb } from "../../lib/debugLog";
 import { getAudioContext, SpeechPlayer, unlockAudio } from "./audioPlayback";
-import {
-  acquireKokoroClient,
-  releaseKokoroClient,
-  type KokoroClient,
-  type KokoroClientStatus,
-  type WorkerLike,
-} from "./kokoroClient";
+import type { KokoroClientStatus, WorkerLike } from "./kokoroClient";
+import { acquireSpeechEngine, currentSpeechEngineKind, type SpeechEngine } from "./speechEngine";
 import { DEFAULT_TTS_CONFIG, type KokoroVoiceConfig, type TTSAudioChunk } from "./kokoroTypes";
 import { PrebufferGate } from "./prebufferGate";
 
@@ -57,7 +52,10 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const clientRef = useRef<KokoroClient | null>(null);
+  // Fixed for the lifetime of the hook: Kokoro on desktops, the cloud voice on
+  // phones. Tests that inject a worker always get Kokoro.
+  const [engineKind] = useState(() => (options.createWorker ? ("kokoro" as const) : currentSpeechEngineKind()));
+  const clientRef = useRef<SpeechEngine | null>(null);
   const playerRef = useRef<SpeechPlayer | null>(null);
   const mountedRef = useRef(false);
   const activeRef = useRef<ActiveSpeech | null>(null);
@@ -119,8 +117,10 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
 
   useEffect(() => {
     mountedRef.current = true;
-    const client = acquireKokoroClient(optionsRef.current.createWorker);
+    const lease = acquireSpeechEngine(engineKind, optionsRef.current.createWorker);
+    const client = lease.engine;
     clientRef.current = client;
+    breadcrumb(`tts: engine=${engineKind}`);
     playerRef.current = new SpeechPlayer(optionsRef.current.getAudioContext ?? getAudioContext);
 
     let previousState = client.status.modelState;
@@ -138,9 +138,9 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
       playerRef.current?.stop();
       playerRef.current = null;
       clientRef.current = null;
-      releaseKokoroClient(client);
+      lease.release();
     };
-  }, [ifMounted, interrupt]);
+  }, [ifMounted, interrupt, engineKind]);
 
   // iOS suspends audio and timers for a hidden page; pause the utterance (and
   // with it the avatar's clock) instead of letting them drift, and continue
@@ -328,6 +328,8 @@ export function useKokoroTTS(options: UseKokoroTTSOptions = {}) {
     isLoadingModel: status.modelState === "loading",
     isGenerating,
     isSpeaking,
+    /** "kokoro" (on-device) or "cloud" (server-side voice). */
+    engine: engineKind,
     isReady: status.modelState === "ready",
     /** The model failed to load (a catchable error, not a page kill). */
     modelFailed: status.modelState === "error",
