@@ -4,8 +4,8 @@ import { getAudioContext } from "./audioPlayback";
 import { trimSilence } from "./trimSilence";
 import type { SynthesisOutcome, TTSAudioChunk } from "./ttsTypes";
 
-// The interviewer's voice: the server turns each sentence into MP3 (Amazon
-// Polly), the browser decodes it to PCM, and it flows into the playback and
+// The interviewer's voice: the server turns each sentence into MP3 (Deepgram
+// Aura), the browser decodes it to PCM, and it flows into the playback and
 // lip-sync path. Nothing is downloaded or run on the device beyond audio
 // decoding, so it behaves the same on desktops and phones.
 

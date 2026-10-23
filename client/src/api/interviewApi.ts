@@ -3,6 +3,8 @@ import type {
   AnalyzeResponse,
   ApiErrorBody,
   ApiErrorCode,
+  EvaluateRequest,
+  EvaluateResponse,
   FinishRequest,
   FinishResponse,
   RespondRequest,
@@ -69,6 +71,8 @@ export const interviewApi = {
   analyze: (body: AnalyzeRequest, signal?: AbortSignal) => post<AnalyzeResponse>("analyze", body, signal),
   start: (body: StartRequest, signal?: AbortSignal) => post<StartResponse>("start", body, signal),
   respond: (body: RespondRequest, signal?: AbortSignal) => post<RespondResponse>("respond", body, signal),
+  /** Scores an answer already submitted via respond(). Fire-and-forget: nothing the candidate waits on. */
+  evaluate: (body: EvaluateRequest, signal?: AbortSignal) => post<EvaluateResponse>("evaluate", body, signal),
   finish: (body: FinishRequest, signal?: AbortSignal) => post<FinishResponse>("finish", body, signal),
   /** Cloud voice: one sentence in, base64 MP3 out. */
   speech: (body: TtsRequest, signal?: AbortSignal) => postTo<TtsResponse>("/api/tts", body, signal),

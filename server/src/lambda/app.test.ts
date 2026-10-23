@@ -6,6 +6,7 @@ import {
   blueprintOutput,
   fakeGenerate,
   jobOutput,
+  liveTurnEvalOutput,
   liveTurnOutput,
   questionDraft,
   reportOutput,
@@ -57,6 +58,7 @@ function harness(opts: { perMinute?: number; perDay?: number } = {}) {
       interview_blueprint: blueprintOutput(),
       first_question: { openingText: "Hi, I'm Maya.", question: questionDraft() },
       live_turn: () => liveTurnOutput(),
+      live_turn_eval: () => liveTurnEvalOutput(),
       final_report: reportOutput(),
     });
     const store = new SessionStore();
@@ -68,7 +70,6 @@ function harness(opts: { perMinute?: number; perDay?: number } = {}) {
       httpRequestsPerMinutePerIp: opts.perMinute ?? 60,
       geminiCallsPerDay: opts.perDay ?? 0,
       sessionTtlMs: 3_600_000,
-      flushWaitMs: 1_000,
     });
     const event: UrlEvent = {
       rawPath: path,
@@ -136,6 +137,32 @@ describe("Lambda app", () => {
     expect(calls.filter((c) => c === "live_turn")).toHaveLength(1);
   });
 
+  it("scores an answer on a later instance and keeps it with the session", async () => {
+    const { request, calls, items } = harness();
+    const { body: a } = await request("/api/interview/analyze", analyzeBody);
+    const { body: s } = await request("/api/interview/start", { sessionId: a.sessionId });
+    const respond = await request("/api/interview/respond", {
+      sessionId: a.sessionId,
+      turnId: 1,
+      questionId: s.firstQuestion.id,
+      candidateTranscript: "My answer.",
+      completionReason: "manual",
+      elapsedSeconds: 10,
+    });
+    // The reply comes back without a scoring call...
+    expect(respond.status).toBe(200);
+    expect(calls).not.toContain("live_turn_eval");
+
+    const evalReq = { sessionId: a.sessionId, questionId: s.firstQuestion.id };
+    const scored = await request("/api/interview/evaluate", evalReq);
+    expect(scored.body).toMatchObject({ evaluated: true });
+    // ...and scoring twice does not call Gemini twice.
+    const again = await request("/api/interview/evaluate", evalReq);
+    expect(again.body).toMatchObject({ evaluated: false });
+    expect(calls.filter((c) => c === "live_turn_eval")).toHaveLength(1);
+    expect(items.size).toBeGreaterThan(0);
+  });
+
   it("returns SESSION_NOT_FOUND for an unknown session", async () => {
     const { request } = harness();
     const res = await request("/api/interview/respond", {
@@ -163,7 +190,6 @@ describe("Lambda app", () => {
         httpRequestsPerMinutePerIp: 60,
         geminiCallsPerDay: 0,
         sessionTtlMs: 1000,
-        flushWaitMs: 100,
       });
     };
     const base = {
@@ -235,7 +261,6 @@ describe("Lambda app", () => {
       httpRequestsPerMinutePerIp: 60,
       geminiCallsPerDay: 0,
       sessionTtlMs: 1,
-      flushWaitMs: 1,
     });
     const health = await app({ rawPath: "/api/health", requestContext: { http: { method: "GET" } } });
     expect(JSON.parse(health.body)).toEqual({ ok: true, model: "m" });

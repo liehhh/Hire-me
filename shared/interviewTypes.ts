@@ -378,7 +378,7 @@ export interface RespondResponse {
   nextTurnId: number | null;
   /** One-sentence summary of the answer that was evaluated. */
   answerSummary: string;
-  /** Null: the reply is sent as soon as it is ready; the evaluation finishes server-side afterwards. */
+  /** Always null: scoring is a separate call (POST /api/interview/evaluate) so the reply is never held up by it. */
   answerEvaluation: AnswerEvaluation | null;
   nextAction: NextAction;
   nextQuestion?: InterviewQuestion;
@@ -386,6 +386,19 @@ export interface RespondResponse {
   /** Short text for the interviewer to speak: optional acknowledgement + question (or closing). */
   conversationMessage: string;
   progress: InterviewProgress;
+}
+
+export interface EvaluateRequest {
+  sessionId: string;
+  /** The question whose (already submitted) answer should be scored. */
+  questionId: string;
+}
+
+export interface EvaluateResponse {
+  sessionId: string;
+  questionId: string;
+  /** False when the answer had already been scored. */
+  evaluated: boolean;
 }
 
 export interface FinishRequest {

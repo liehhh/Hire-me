@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   AnalyzeRequest,
+  EvaluateRequest,
   FinishRequest,
   RespondRequest,
   TranscriptTurn,
@@ -69,6 +70,11 @@ export const respondRequestSchema = z.object({
   completionReason: z.enum(["manual", "silence", "timeout", "typed"]),
   elapsedSeconds: z.number().min(0).max(24 * 3600),
 }) satisfies z.ZodType<RespondRequest, unknown>;
+
+export const evaluateRequestSchema = z.object({
+  sessionId,
+  questionId: z.string().min(1).max(64),
+}) satisfies z.ZodType<EvaluateRequest, unknown>;
 
 const transcriptTurnSchema = z.object({
   id: z.string().max(64),

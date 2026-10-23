@@ -20,7 +20,7 @@ vi.mock("@google/genai", async (importOriginal) => {
 const { ApiError } = await import("@google/genai");
 const { earlyFields, generateStructured, parseFieldsBefore } = await import("./geminiClient.js");
 const { classifyGeminiError, parseRetryAfterMs } = await import("./geminiErrors.js");
-const { toGeminiSchema, liveTurnOutputSchema } = await import("./geminiSchemas.js");
+const { toGeminiSchema, liveTurnReplySchema } = await import("./geminiSchemas.js");
 
 const schema = z.object({ ok: z.boolean() });
 const request = { task: "test", systemInstruction: "s", prompt: "p", schema, maxOutputTokens: 50 };
@@ -124,7 +124,7 @@ describe("error classification", () => {
 
 describe("toGeminiSchema", () => {
   it("emits only Gemini-supported keys and requires every field", () => {
-    const schema = toGeminiSchema(liveTurnOutputSchema) as { required: string[]; properties: Record<string, unknown> };
+    const schema = toGeminiSchema(liveTurnReplySchema) as { required: string[]; properties: Record<string, unknown> };
     const text = JSON.stringify(schema);
     expect(text).not.toContain("$schema");
     expect(text).not.toContain('"default"');

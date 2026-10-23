@@ -227,26 +227,45 @@ export const answerEvaluationSchema = z.object({
   evidenceSummary: text(500),
 });
 
-// Field order is the order Gemini writes them in. Everything the interviewer
-// says comes before the (long) evaluation, so the reply can be spoken while
-// the evaluation is still streaming in — see LIVE_TURN_EVALUATION_KEY.
+/**
+ * The next question as written in the (fast) reply call. The long-form
+ * metadata (what a strong answer shows, follow-up triggers) is produced
+ * afterwards by the evaluation call, so the candidate never waits for it.
+ */
+export const replyQuestionSchema = questionDraftSchema.pick({
+  text: true,
+  stage: true,
+  competency: true,
+  difficulty: true,
+  source: true,
+  maxFollowUps: true,
+  isFollowUp: true,
+});
+
+/** Everything the interviewer says next. Kept small: the candidate waits for this call. */
 export const liveTurnReplySchema = z.object({
   answerSummary: text(300).describe("One neutral sentence summarising what the candidate said in <candidate_answer>"),
-  competencyAssessed: text(80).describe("Which blueprint competency this answer gave evidence for"),
   nextAction: z.enum(NEXT_ACTIONS),
   endInterview: z.boolean(),
   acknowledgement: text(300).describe(
     "Short spoken reaction that refers to something specific the candidate just said; empty string if none"
   ),
-  nextQuestion: questionDraftSchema.nullable(),
+  nextQuestion: replyQuestionSchema.nullable(),
   closingMessage: text(400).nullable().describe("Spoken goodbye, only when ending the interview"),
 });
 
-/** The last field of the live-turn output; everything before it is the spoken reply. */
-export const LIVE_TURN_EVALUATION_KEY = "evaluation";
-
-export const liveTurnOutputSchema = liveTurnReplySchema.extend({
-  [LIVE_TURN_EVALUATION_KEY]: answerEvaluationSchema,
+/** Background call after the reply: scores the answer and fills in the next question's metadata. */
+export const liveTurnEvalSchema = z.object({
+  competencyAssessed: text(80).describe("Which blueprint competency this answer gave evidence for"),
+  evaluation: answerEvaluationSchema,
+  nextQuestionDetails: z
+    .object({
+      sourceEvidence: text(300).describe("The requirement, CV claim or prior answer the next question tests"),
+      expectedEvidence: list(6, 200),
+      followUpTriggers: list(5, 200),
+    })
+    .nullable()
+    .describe("null when there is no next question"),
 });
 
 // --- Final report ---------------------------------------------------------------
@@ -309,7 +328,7 @@ export type BlueprintOutput = z.output<typeof blueprintOutputSchema>;
 export type QuestionDraft = z.output<typeof questionDraftSchema>;
 export type FirstQuestionOutput = z.output<typeof firstQuestionOutputSchema>;
 export type LiveTurnReply = z.output<typeof liveTurnReplySchema>;
-export type LiveTurnOutput = z.output<typeof liveTurnOutputSchema>;
+export type LiveTurnEval = z.output<typeof liveTurnEvalSchema>;
 export type ReportOutput = z.output<typeof reportOutputSchema>;
 
 // --- Zod -> Gemini JSON Schema -------------------------------------------------

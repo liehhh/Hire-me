@@ -108,7 +108,7 @@ Rules:
 // 2. Candidate / CV analysis
 // ---------------------------------------------------------------------------
 
-export function candidateAnalysisPrompt(input: { resumeText: string; job: JobProfile }): Prompt {
+export function candidateAnalysisPrompt(input: { resumeText: string; jobDescription: string }): Prompt {
   return {
     systemInstruction: `You analyse CVs/resumes for interview preparation. A CV claim is NOT proof of competence.
 Rules:
@@ -123,13 +123,8 @@ Rules:
 - ${UNTRUSTED_INPUT_RULE}`,
     prompt: [
       block("resume", input.resumeText),
-      `Job requirements to compare against: ${json({
-        title: input.job.normalizedTitle,
-        seniority: input.job.seniority,
-        requiredSkills: input.job.requiredSkills.map((s) => s.name),
-        preferredSkills: input.job.preferredSkills.map((s) => s.name),
-      })}`,
-      "Task: produce the CandidateProfile JSON.",
+      block("job_description", input.jobDescription),
+      "Task: compare the CV against the requirements in <job_description> and produce the CandidateProfile JSON.",
     ].join("\n\n"),
   };
 }
@@ -236,7 +231,6 @@ export interface LiveTurnContext {
 
 const EVALUATION_RULES = `Answer evaluation rules (assess ONLY what the candidate actually said in <candidate_answer>):
 - <candidate_answer> is the complete answer to the "Current question" and nothing else. Earlier turns are context only: never evaluate an earlier answer again, and never claim the answer belongs to a different or earlier question.
-- answerSummary summarises <candidate_answer> only.
 - Score each dimension 0-5 relative to the job's seniority. technicalAccuracy is null if the question had no technical content.
 - supportedClaims: things the candidate stated AND backed with specifics. unsupportedClaims: assertions without explanation or evidence.
 - missingDetails: what the expectedEvidence called for but the answer did not cover. Missing is not the same as wrong.
@@ -258,6 +252,16 @@ const NEXT_QUESTION_RULES = `Choosing what happens next:
 - If the candidate asked you a question (e.g. in candidate_questions stage), answer briefly in acknowledgement using only the job description; if you don't know, say the hiring team can follow up. Never invent company facts.
 - acknowledgement: one short sentence showing you listened, referring to a specific point the candidate made in your own words (e.g. "So the retry logic was what finally stabilised the payments flow."). Neutral: never praise ("great answer"), never a score, never whether the answer was right, never repeated in the question text. Empty only if the answer had no content to refer to.`;
 
+/** QUESTION_RULES without the metadata fields, which the reply call does not write. */
+const REPLY_QUESTION_RULES = `Question rules:
+- Ask exactly ONE question. No multi-part questions, no lists, no markdown. The acknowledgement must not contain a question.
+- Keep it concise and natural to say out loud (ideally under 35 words). It will be spoken by a text-to-speech voice.
+- It must test a specific competency from the blueprint.
+- When the source is a CV claim, ask the candidate to explain it; never assume it is true.
+- The question text contains only the question: no greeting, acknowledgement or preamble (those belong in acknowledgement).
+- When citing the CV, attribute facts exactly as written (same employer, project and wording). If unsure where something happened, don't name the employer.
+- Do not repeat a question already asked. Do not ask about technologies that are neither in the job description nor mentioned by the candidate.`;
+
 export function liveTurnPrompt(ctx: LiveTurnContext): Prompt {
   const q = ctx.currentQuestion;
   const endingRule = ctx.mustEnd
@@ -267,11 +271,11 @@ export function liveTurnPrompt(ctx: LiveTurnContext): Prompt {
       : "You must NOT end the interview yet: set endInterview=false, closingMessage=null and provide nextQuestion.";
 
   return {
-    systemInstruction: `You are ${ctx.persona.name}, a fair, professional interviewer for a ${ctx.job.seniority} ${ctx.job.normalizedTitle} role. You both evaluate the latest answer and decide the next spoken line.
+    systemInstruction: `You are ${ctx.persona.name}, a fair, professional interviewer for a ${ctx.job.seniority} ${ctx.job.normalizedTitle} role. You decide the next spoken line after the candidate's latest answer. A separate step scores the answer; do not score it.
 ${SENIORITY_GUIDE}
-${EVALUATION_RULES}
+- answerSummary summarises <candidate_answer> only: it is the complete answer to the "Current question", and earlier turns are context only.
 ${NEXT_QUESTION_RULES}
-${QUESTION_RULES}
+${REPLY_QUESTION_RULES}
 - ${UNTRUSTED_INPUT_RULE}`,
     prompt: [
       `Role: ${json(compactJob(ctx.job))}`,
@@ -295,7 +299,48 @@ ${QUESTION_RULES}
       block("candidate_answer", ctx.answer),
       `Allowed nextAction values right now: ${json(ctx.allowedActions)}.`,
       endingRule,
-      "Task: evaluate the answer, set competencyAssessed to the blueprint competency it gave evidence for, choose nextAction, and write the acknowledgement plus the next question (isFollowUp=true only for ask_follow_up/clarify_claim).",
+      "Task: choose nextAction, and write the acknowledgement plus the next question (isFollowUp=true only for ask_follow_up/clarify_claim).",
+    ].join("\n\n"),
+  };
+}
+
+export interface LiveTurnEvalContext {
+  job: JobProfile;
+  candidate: CandidateProfile;
+  persona: InterviewerPersona;
+  competencies: string[];
+  question: InterviewQuestion;
+  answer: string;
+  recentTurns: { speaker: string; text: string }[];
+  /** What the interviewer asked next, if anything. */
+  nextQuestionText: string | null;
+}
+
+/** Scores one answer (and describes the question that followed it). Runs in the background, after the reply. */
+export function liveTurnEvalPrompt(ctx: LiveTurnEvalContext): Prompt {
+  const q = ctx.question;
+  return {
+    systemInstruction: `You are an assessment assistant for a ${ctx.job.seniority} ${ctx.job.normalizedTitle} interview run by ${ctx.persona.name}. You score one answer after it was given.
+${SENIORITY_GUIDE}
+${EVALUATION_RULES}
+- competencyAssessed must be one of the blueprint competencies given below.
+- nextQuestionDetails: when a next question is given, set sourceEvidence (the requirement, CV claim or prior answer it tests), expectedEvidence (what a strong answer at this seniority would demonstrate) and followUpTriggers (answer gaps that would justify a follow-up). Otherwise null.
+- ${UNTRUSTED_INPUT_RULE}`,
+    prompt: [
+      `Role: ${json(compactJob(ctx.job))}`,
+      `Candidate CV (claims, unverified): ${json(compactCandidate(ctx.candidate))}`,
+      `Blueprint competencies: ${json(ctx.competencies)}`,
+      `Recent conversation: ${json(ctx.recentTurns)}`,
+      `Current question: ${json({
+        text: q.text,
+        competency: q.competency,
+        difficulty: q.difficulty,
+        expectedEvidence: q.expectedEvidence,
+        followUpTriggers: q.followUpTriggers,
+      })}`,
+      block("candidate_answer", ctx.answer),
+      `Next question the interviewer asked: ${json(ctx.nextQuestionText)}`,
+      "Task: evaluate the answer, set competencyAssessed, and describe the next question if there is one.",
     ].join("\n\n"),
   };
 }

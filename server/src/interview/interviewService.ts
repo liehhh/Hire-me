@@ -3,6 +3,8 @@ import type { z } from "zod";
 import type {
   AnalyzeResponse,
   CandidateProfile,
+  EvaluateRequest,
+  EvaluateResponse,
   FinishRequest,
   InterviewQuestion,
   InterviewReport,
@@ -12,7 +14,7 @@ import type {
   TranscriptTurn,
 } from "../../../shared/interviewTypes.js";
 import { LIMITS, MAX_SPOKEN_CHARACTERS } from "../config.js";
-import { earlyFields, type GenerateStructured } from "../services/gemini/geminiClient.js";
+import type { GenerateStructured } from "../services/gemini/geminiClient.js";
 import { AppError } from "../services/gemini/geminiErrors.js";
 import {
   candidateAnalysisPrompt,
@@ -20,6 +22,7 @@ import {
   firstQuestionPrompt,
   interviewBlueprintPrompt,
   jobAnalysisPrompt,
+  liveTurnEvalPrompt,
   liveTurnPrompt,
 } from "../services/gemini/geminiPrompts.js";
 import {
@@ -27,13 +30,13 @@ import {
   candidateAnalysisOutputSchema,
   firstQuestionOutputSchema,
   jobAnalysisOutputSchema,
-  LIVE_TURN_EVALUATION_KEY,
-  liveTurnOutputSchema,
+  liveTurnEvalSchema,
   liveTurnReplySchema,
+  questionDraftSchema,
+  replyQuestionSchema,
   reportOutputSchema,
-  type LiveTurnOutput,
+  type LiveTurnEval,
   type LiveTurnReply,
-  type QuestionDraft,
 } from "../services/gemini/geminiSchemas.js";
 import { durationRangeFor, matchCompetency, normalizeBlueprint, targetDuration } from "./blueprint.js";
 import {
@@ -51,6 +54,18 @@ import { similarity, truncate } from "./text.js";
 
 type AnalyzeInput = z.output<typeof analyzeRequestSchema>;
 type StartInput = z.output<typeof startRequestSchema>;
+
+/** A drafted question; the metadata fields are absent when it came from the fast reply call. */
+type QuestionInput = z.output<typeof replyQuestionSchema> & Partial<z.output<typeof questionDraftSchema>>;
+
+/** A scored answer waiting to be committed to the session. */
+export interface EvaluationResult {
+  questionId: string;
+  answerTurnId: string;
+  /** The question asked after this answer, whose metadata the evaluation fills in. */
+  nextQuestionId?: string;
+  output: LiveTurnEval;
+}
 
 const PERSONA = { name: "Maya", title: "Interviewer" };
 
@@ -72,20 +87,6 @@ const EMPTY_CANDIDATE: CandidateProfile = {
 
 const ANALYSIS_TIMEOUT_MS = Math.max(LIMITS.requestTimeoutMs, 30_000);
 
-/** Waits for background evaluations, but never longer than `maxWaitMs`. */
-async function settleEvaluations(session: InterviewSession, maxWaitMs: number): Promise<void> {
-  const pending = [...(session.pendingEvaluations ?? [])];
-  if (!pending.length) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    Promise.allSettled(pending),
-    new Promise((resolve) => {
-      timer = setTimeout(resolve, maxWaitMs);
-    }),
-  ]);
-  clearTimeout(timer);
-}
-
 /** Joins spoken parts and keeps the result short enough to speak. */
 function spoken(...parts: (string | null | undefined)[]): string {
   const clean = parts.map((p) => (p ?? "").replace(/[*_#`>]/g, "").trim()).filter(Boolean);
@@ -103,16 +104,6 @@ export class InterviewService {
     private readonly store: SessionStore,
     private readonly now: () => number = Date.now
   ) {}
-
-  /**
-   * Waits for answer evaluations that are still streaming after their reply
-   * was sent. A serverless runtime freezes background work once the response
-   * is returned, so the Lambda handler calls this before persisting.
-   */
-  flushBackground(sessionId: string, maxWaitMs: number): Promise<void> {
-    const session = this.store.peek(sessionId);
-    return session ? settleEvaluations(session, maxWaitMs) : Promise.resolve();
-  }
 
   private iso() {
     return new Date(this.now()).toISOString();
@@ -134,6 +125,22 @@ export class InterviewService {
   }
 
   private async runAnalysis(input: AnalyzeInput): Promise<AnalyzeResponse> {
+    // The CV is read against the job's skills, but the job description itself
+    // is enough for that, so both analyses run side by side.
+    const candidatePromise: Promise<CandidateProfile> = input.resumeText
+      ? this.generate({
+          task: "candidate_analysis",
+          ...candidateAnalysisPrompt({ resumeText: input.resumeText, jobDescription: input.jobDescription }),
+          schema: candidateAnalysisOutputSchema,
+          maxOutputTokens: LIMITS.analysisMaxOutputTokens,
+          timeoutMs: ANALYSIS_TIMEOUT_MS,
+          thinking: "low",
+          temperature: 0.1,
+        }).then((profile) => ({ hasResume: true as const, ...profile }))
+      : Promise.resolve(EMPTY_CANDIDATE);
+    // A rejected CV analysis must not surface as unhandled while the job analysis is still running.
+    candidatePromise.catch(() => undefined);
+
     const job = await this.generate({
       task: "job_analysis",
       ...jobAnalysisPrompt({ ...input }),
@@ -152,20 +159,7 @@ export class InterviewService {
       );
     }
 
-    const candidate: CandidateProfile = input.resumeText
-      ? {
-          hasResume: true,
-          ...(await this.generate({
-            task: "candidate_analysis",
-            ...candidateAnalysisPrompt({ resumeText: input.resumeText, job }),
-            schema: candidateAnalysisOutputSchema,
-            maxOutputTokens: LIMITS.analysisMaxOutputTokens,
-            timeoutMs: ANALYSIS_TIMEOUT_MS,
-            thinking: "low",
-            temperature: 0.1,
-          })),
-        }
-      : EMPTY_CANDIDATE;
+    const candidate = await candidatePromise;
 
     const window = targetDuration(job.seniority, input.preferredLength);
     const rawBlueprint = await this.generate({
@@ -376,9 +370,6 @@ export class InterviewService {
     answer: string,
     signal: AbortSignal
   ): Promise<RespondResponse> {
-    // The previous answer's evaluation feeds coverage and pacing. It almost
-    // always finished while the candidate was talking.
-    await settleEvaluations(session, 10_000);
     const now = this.now();
     const question = session.currentQuestion!;
     const pace = pacing(session, now, question.competency);
@@ -401,12 +392,10 @@ export class InterviewService {
       return null;
     };
 
-    // One streamed Gemini call. The spoken reply is written first and is
-    // used as soon as it is complete; the evaluation keeps streaming and is
-    // committed in the background.
-    let deliverReply!: (reply: LiveTurnReply) => void;
-    const earlyReply = new Promise<LiveTurnReply>((resolve) => (deliverReply = resolve));
-    const full: Promise<LiveTurnOutput> = this.generate({
+    // Only the spoken reply is generated here. Scoring the answer is a separate
+    // call (`evaluate`) the client fires after this response, so the candidate
+    // never waits for it.
+    const out: LiveTurnReply = await this.generate({
       task: "live_turn",
       ...liveTurnPrompt({
         job: session.jobProfile,
@@ -439,55 +428,17 @@ export class InterviewService {
         plannedMinutes: pace.planned,
         estimatedQuestionsRemaining: Math.max(0, session.blueprint.totalQuestions - session.questionCount),
       }),
-      schema: liveTurnOutputSchema,
-      maxOutputTokens: LIMITS.liveTurnMaxOutputTokens,
+      schema: liveTurnReplySchema,
+      maxOutputTokens: LIMITS.liveReplyMaxOutputTokens,
       temperature: 0.5,
       signal,
       check: checkReply,
-      early: earlyFields({
-        beforeKey: LIVE_TURN_EVALUATION_KEY,
-        schema: liveTurnReplySchema,
-        check: checkReply,
-        onEarly: deliverReply,
-      }),
     });
-    // Rejects only if Gemini fails before the reply was complete.
-    const out = await Promise.race([earlyReply, full]);
 
     // The interview ended while Gemini was working — never commit a stale turn.
     const turnId = session.turnId;
     if (signal.aborted || session.status !== "active" || session.currentQuestion?.id !== question.id) {
       throw new AppError("CANCELLED", "The interview ended before this answer was processed.", 409);
-    }
-
-    // --- commit evaluation + evidence (in the background if still streaming)
-    const commitEvaluation = (result: LiveTurnOutput) => {
-      const competency = resolveCompetency(session, result.competencyAssessed);
-      session.evaluations = session.evaluations.filter((e) => e.questionId !== question.id);
-      session.evaluations.push({
-        questionId: question.id,
-        competency,
-        answerTurnId: answerTurn.id,
-        evaluation: result.evaluation,
-      });
-      updateLedger(session, competency, result.evaluation, answerTurn.id);
-      if (result.evaluation.relevance >= 2 && !session.competenciesCovered.includes(competency)) {
-        session.competenciesCovered.push(competency);
-      }
-    };
-    const complete = LIVE_TURN_EVALUATION_KEY in out ? (out as LiveTurnOutput) : null;
-    if (complete) {
-      commitEvaluation(complete);
-    } else {
-      const pending = (session.pendingEvaluations ??= new Set());
-      const job: Promise<void> = full
-        .then(commitEvaluation)
-        .catch((err: unknown) => {
-          const code = err instanceof AppError ? err.code : "UNKNOWN";
-          console.warn(`[interview] evaluation for ${question.id} failed after the reply was sent (${code})`);
-        })
-        .finally(() => pending.delete(job));
-      pending.add(job);
     }
 
     // --- decide continue / end (server rules win over the model)
@@ -527,7 +478,7 @@ export class InterviewService {
       questionId: question.id,
       nextTurnId: ending ? null : turnId + 1,
       answerSummary: out.answerSummary,
-      answerEvaluation: complete?.evaluation ?? null,
+      answerEvaluation: null,
       nextAction,
       nextQuestion,
       shouldContinue: !ending,
@@ -535,6 +486,85 @@ export class InterviewService {
       progress: progressOf(session, this.now()),
     };
     return response;
+  }
+
+  // -------------------------------------------------------------------------
+  // POST /api/interview/evaluate
+  // -------------------------------------------------------------------------
+
+  /** Scores one answered question in an in-memory session (local server). */
+  async evaluate(input: EvaluateRequest): Promise<EvaluateResponse> {
+    const session = this.store.get(input.sessionId);
+    const result = await this.runEvaluation(session, input.questionId);
+    if (result) this.applyEvaluation(session, result);
+    return { sessionId: input.sessionId, questionId: input.questionId, evaluated: Boolean(result) };
+  }
+
+  /**
+   * Asks Gemini to score the answer to `questionId`. Reads the session but
+   * never changes it, so a serverless handler can run this without holding the
+   * session and commit the result afterwards. Returns undefined when there is
+   * nothing to do.
+   */
+  async runEvaluation(session: InterviewSession, questionId: string): Promise<EvaluationResult | undefined> {
+    if (session.report || session.evaluations.some((e) => e.questionId === questionId)) return undefined;
+    const index = session.questions.findIndex((q) => q.id === questionId);
+    const answerIndex = session.transcript.findIndex((t) => t.speaker === "candidate" && t.questionId === questionId);
+    if (index < 0 || answerIndex < 0) {
+      throw new AppError("STALE_QUESTION", "There is no answer to evaluate for that question.", 409);
+    }
+    // Scoring is best-effort; it must not eat the budget kept for the report.
+    if (session.geminiCalls >= LIMITS.maxGeminiCallsPerSession - 2) return undefined;
+
+    const question = session.questions[index];
+    const answerTurn = session.transcript[answerIndex];
+    const next = session.questions[index + 1];
+    const output = await this.generate({
+      task: "live_turn_eval",
+      ...liveTurnEvalPrompt({
+        job: session.jobProfile,
+        candidate: session.candidateProfile,
+        persona: session.persona,
+        competencies: session.blueprint.competencyWeights.map((c) => c.competency),
+        question,
+        answer: answerTurn.text,
+        recentTurns: session.transcript
+          .slice(Math.max(0, answerIndex - 4), answerIndex)
+          .map((t) => ({ speaker: t.speaker, text: truncate(t.text, 600) })),
+        nextQuestionText: next?.text ?? null,
+      }),
+      schema: liveTurnEvalSchema,
+      maxOutputTokens: LIMITS.liveTurnMaxOutputTokens,
+      temperature: 0.2,
+      thinking: "low",
+    });
+    return { questionId, answerTurnId: answerTurn.id, nextQuestionId: next?.id, output };
+  }
+
+  /** Commits a finished evaluation. Idempotent per question, so a save retry can re-apply it to a fresh copy. */
+  applyEvaluation(session: InterviewSession, result: EvaluationResult) {
+    if (session.evaluations.some((e) => e.questionId === result.questionId)) return;
+    session.geminiCalls++;
+    const { output } = result;
+    const competency = resolveCompetency(session, output.competencyAssessed);
+    session.evaluations.push({
+      questionId: result.questionId,
+      competency,
+      answerTurnId: result.answerTurnId,
+      evaluation: output.evaluation,
+    });
+    updateLedger(session, competency, output.evaluation, result.answerTurnId);
+    if (output.evaluation.relevance >= 2 && !session.competenciesCovered.includes(competency)) {
+      session.competenciesCovered.push(competency);
+    }
+
+    const details = output.nextQuestionDetails;
+    if (details && result.nextQuestionId) {
+      // `currentQuestion` is a separate copy of the question once a session has been stored and reloaded.
+      for (const q of [session.questions.find((x) => x.id === result.nextQuestionId), session.currentQuestion]) {
+        if (q && q.id === result.nextQuestionId) Object.assign(q, details);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -591,7 +621,6 @@ export class InterviewService {
   }
 
   private async runReport(session: InterviewSession): Promise<InterviewReport> {
-    await settleEvaluations(session, LIMITS.requestTimeoutMs * 2);
     const answered = this.answeredQuestions(session);
     if (answered.length === 0) return emptyReport(session, this.now());
 
@@ -632,7 +661,7 @@ export class InterviewService {
 
   // -------------------------------------------------------------------------
 
-  private toQuestion(session: InterviewSession, draft: QuestionDraft, isFollowUp: boolean): InterviewQuestion {
+  private toQuestion(session: InterviewSession, draft: QuestionInput, isFollowUp: boolean): InterviewQuestion {
     const { baseline, maximum } = session.blueprint.difficultyProfile;
     const knownStage = session.blueprint.stages.some((s) => s.name === draft.stage);
     return {
@@ -642,9 +671,10 @@ export class InterviewService {
       competency: matchCompetency(draft.competency, session.blueprint.competencyWeights) ?? draft.competency,
       difficulty: Math.min(maximum, Math.max(Math.max(1, baseline - 1), draft.difficulty)),
       source: draft.source,
-      sourceEvidence: draft.sourceEvidence,
-      expectedEvidence: draft.expectedEvidence,
-      followUpTriggers: draft.followUpTriggers,
+      // Questions from the fast reply call get these filled in later by the evaluation call.
+      sourceEvidence: draft.sourceEvidence ?? "",
+      expectedEvidence: draft.expectedEvidence ?? [],
+      followUpTriggers: draft.followUpTriggers ?? [],
       maxFollowUps: Math.min(draft.maxFollowUps, 2),
       isFollowUp,
     };

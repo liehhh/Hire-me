@@ -2,6 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import type { InterviewService } from "../interview/interviewService.js";
 import {
   analyzeRequestSchema,
+  evaluateRequestSchema,
   finishRequestSchema,
   respondRequestSchema,
   startRequestSchema,
@@ -24,6 +25,8 @@ export function interviewRouter(service: InterviewService) {
   router.post("/start", route((req) => service.start(startRequestSchema.parse(req.body))));
 
   router.post("/respond", route((req) => service.respond(respondRequestSchema.parse(req.body))));
+
+  router.post("/evaluate", route((req) => service.evaluate(evaluateRequestSchema.parse(req.body))));
 
   router.post(
     "/finish",

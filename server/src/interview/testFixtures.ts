@@ -3,7 +3,8 @@ import type { GenerateStructured, StructuredRequest } from "../services/gemini/g
 import type {
   BlueprintOutput,
   JobAnalysisOutput,
-  LiveTurnOutput,
+  LiveTurnEval,
+  LiveTurnReply,
   QuestionDraft,
   ReportOutput,
 } from "../services/gemini/geminiSchemas.js";
@@ -73,9 +74,26 @@ export function questionDraft(overrides: Partial<QuestionDraft> = {}): QuestionD
   };
 }
 
-export function liveTurnOutput(overrides: Partial<LiveTurnOutput> = {}): LiveTurnOutput {
+export function liveTurnOutput(overrides: Partial<LiveTurnReply> = {}): LiveTurnReply {
   return {
     answerSummary: "The candidate explained where React state should live.",
+    nextAction: "move_to_next_competency",
+    endInterview: false,
+    acknowledgement: "Thanks.",
+    nextQuestion: questionDraft({ text: `Question ${Math.random().toString(36).slice(2)} about closures and scope?`, competency: "JavaScript fundamentals" }),
+    closingMessage: null,
+    ...overrides,
+  };
+}
+
+export function liveTurnEvalOutput(overrides: Partial<LiveTurnEval> = {}): LiveTurnEval {
+  return {
+    competencyAssessed: "React fundamentals",
+    nextQuestionDetails: {
+      sourceEvidence: "Closures come up in the job description",
+      expectedEvidence: ["Explains lexical scope"],
+      followUpTriggers: ["No example given"],
+    },
     evaluation: {
       relevance: 4,
       specificity: 3,
@@ -91,12 +109,6 @@ export function liveTurnOutput(overrides: Partial<LiveTurnOutput> = {}): LiveTur
       contradictions: [],
       evidenceSummary: "Reasonable understanding of state ownership.",
     },
-    competencyAssessed: "React fundamentals",
-    nextAction: "move_to_next_competency",
-    endInterview: false,
-    acknowledgement: "Thanks.",
-    nextQuestion: questionDraft({ text: `Question ${Math.random().toString(36).slice(2)} about closures and scope?`, competency: "JavaScript fundamentals" }),
-    closingMessage: null,
     ...overrides,
   };
 }

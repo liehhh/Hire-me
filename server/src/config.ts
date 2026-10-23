@@ -46,6 +46,8 @@ export const LIMITS = {
   analysisMaxOutputTokens: 3_000,
   /** Per-turn JSON (evaluation + next question). The spoken part is capped separately. */
   liveTurnMaxOutputTokens: 1_200,
+  /** The spoken reply alone (summary, acknowledgement, next question): small, so it comes back fast. */
+  liveReplyMaxOutputTokens: 600,
   /** Spoken text budget — the voice should never be handed a monologue. */
   liveResponseMaxTokens: 300,
   reportMaxOutputTokens: intEnv("REPORT_MAX_OUTPUT_TOKENS", 8_192),

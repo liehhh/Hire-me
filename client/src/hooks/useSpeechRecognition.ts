@@ -49,7 +49,7 @@ const FATAL_ERRORS: Record<string, string> = {
 };
 
 /** Longest we wait for the browser to deliver the last final result after stop(). */
-const FLUSH_TIMEOUT_MS = 2000;
+const FLUSH_TIMEOUT_MS = 800;
 
 /**
  * Web Speech API recognition, driven imperatively by the conversation

@@ -18,7 +18,7 @@ interface StoredError {
 /** Runtime-only fields (live promises, abort controllers) never leave the process. */
 type Persisted = Omit<
   InterviewSession,
-  "startPromise" | "inFlight" | "pendingEvaluations" | "reportPromise" | "responses" | "reportError"
+  "startPromise" | "inFlight" | "reportPromise" | "responses" | "reportError"
 > & {
   responses: [string, RespondResponse][];
   reportError?: StoredError;
@@ -26,8 +26,8 @@ type Persisted = Omit<
 };
 
 export function encodeSession(session: InterviewSession): Buffer {
-  const { startPromise, inFlight, pendingEvaluations, reportPromise, responses, reportError, ...durable } = session;
-  void startPromise, void inFlight, void pendingEvaluations, void reportPromise;
+  const { startPromise, inFlight, reportPromise, responses, reportError, ...durable } = session;
+  void startPromise, void inFlight, void reportPromise;
   const persisted: Persisted = {
     ...durable,
     responses: [...responses.entries()],

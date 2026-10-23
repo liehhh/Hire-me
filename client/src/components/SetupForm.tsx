@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { ArrowRight, FileUp, Loader2 } from "lucide-react";
 import { interviewApi, ApiRequestError } from "../api/interviewApi";
+import { prefetchStart } from "../api/startInterview";
 import type { AnalyzeRequest, AnalyzeResponse, InterviewMode, PreferredLength } from "../types";
 
 const MIN_JD_CHARS = 50;
@@ -71,7 +72,10 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
     inFlightRef.current = true;
     setIsLoading(true);
     try {
-      onAnalyzed(await interviewApi.analyze(body));
+      const analysis = await interviewApi.analyze(body);
+      // Generate the first question while the candidate is still on the prep screen.
+      prefetchStart(analysis);
+      onAnalyzed(analysis);
     } catch (err) {
       const message = err instanceof ApiRequestError ? err.message : "Something went wrong.";
       const wait =

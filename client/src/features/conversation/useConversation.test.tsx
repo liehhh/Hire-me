@@ -71,7 +71,7 @@ const api = {
 };
 vi.mock("../../api/interviewApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/interviewApi")>();
-  return { ...actual, interviewApi: { start: (b: unknown) => api.start(b), respond: (b: RespondRequest, s?: AbortSignal) => api.respond(b, s) } };
+  return { ...actual, interviewApi: { start: (b: unknown) => api.start(b), evaluate: async () => ({}), respond: (b: RespondRequest, s?: AbortSignal) => api.respond(b, s) } };
 });
 
 const { useConversation, AUTO_FINISH_SILENCE_MS, MAX_ANSWER_DURATION_MS, POST_AI_PAUSE_MS } = await import(

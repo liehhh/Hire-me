@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { ApiRequestError, interviewApi, isCancelled } from "../../api/interviewApi";
+import { startInterview } from "../../api/startInterview";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import type { AvatarSpeechAdapter } from "../avatar/AvatarSpeechAdapter";
 import { useSpeech } from "../tts/useSpeech";
@@ -29,12 +30,13 @@ import { appendFinalChunk } from "./transcript";
 // and are dropped if that turn is no longer current.
 
 /** Natural beat between the interviewer finishing and the mic opening. */
-export const POST_AI_PAUSE_MS = 400;
+export const POST_AI_PAUSE_MS = 150;
 /**
- * Fallback only — "Done speaking" is the primary way to end an answer. Long
- * enough that the candidate can pause to think mid-answer.
+ * Fallback only — "Done speaking" is the primary way to end an answer. Every
+ * second of this is dead air before the interviewer reacts, so it is kept
+ * short; speech activity restarts it, so a pause to think rarely trips it.
  */
-export const AUTO_FINISH_SILENCE_MS = 12_000;
+export const AUTO_FINISH_SILENCE_MS = 3_500;
 /**
  * Safety net for a mic left running, not a limit on long answers: candidates
  * may talk for as long as they need.
@@ -285,12 +287,7 @@ export function useConversation(options: {
     if (!machine.transition("preparing")) return;
     setError(null);
     try {
-      const res = await interviewApi.start({
-        sessionId: analysis.sessionId,
-        jobProfile: analysis.jobProfile,
-        candidateProfile: analysis.candidateProfile,
-        interviewBlueprint: analysis.interviewBlueprint,
-      });
+      const res = await startInterview(analysis);
       if (!machine.is("preparing")) return;
       sessionIdRef.current = res.sessionId;
       callStartedAtRef.current = Date.now();
@@ -379,6 +376,14 @@ export function useConversation(options: {
         return;
       }
       activeRequestIdRef.current = null;
+
+      // Scoring the answer is a separate call, so the reply above is not held up by it.
+      // The server keeps it with the session; losing it only leaves that answer unscored.
+      try {
+        void interviewApi.evaluate({ sessionId: res.sessionId, questionId: res.questionId }).catch(() => undefined);
+      } catch {
+        /* best effort */
+      }
 
       if (!machine.transition("ready_for_ai")) return;
       setProgress(res.progress);

@@ -6,6 +6,7 @@ import {
   blueprintOutput,
   fakeGenerate,
   jobOutput,
+  liveTurnEvalOutput,
   liveTurnOutput,
   questionDraft,
   reportOutput,
@@ -32,6 +33,7 @@ function setup(responders: Record<string, unknown> = {}) {
     interview_blueprint: blueprintOutput(),
     first_question: { openingText: "Hi, I'm Maya. This will take about thirty minutes.", question: questionDraft() },
     live_turn: () => liveTurnOutput(),
+    live_turn_eval: () => liveTurnEvalOutput(),
     final_report: reportOutput(),
     ...responders,
   });
@@ -94,7 +96,7 @@ describe("InterviewService", () => {
   });
 
   it("returns a spoken message combining acknowledgement and the next question, tagged with the turn", async () => {
-    const { service, sessionId, start } = await startedInterview();
+    const { service, store, sessionId, start } = await startedInterview();
     expect(start.turnId).toBe(1);
     const res = await service.respond(
       answer(sessionId, 1, start.firstQuestion.id, "State is owned by the component, props come from the parent.")
@@ -103,7 +105,10 @@ describe("InterviewService", () => {
     expect(res.shouldContinue).toBe(true);
     expect(res.conversationMessage).toBe(`Thanks. ${res.nextQuestion!.text}`);
     expect(res.progress.questionsAsked).toBe(2);
-    expect(res.progress.competenciesCovered).toContain("React fundamentals");
+    expect(res.answerEvaluation).toBeNull();
+    // Scoring is a separate call, made after the reply.
+    await service.evaluate({ sessionId, questionId: start.firstQuestion.id });
+    expect(store.get(sessionId).competenciesCovered).toContain("React fundamentals");
   });
 
   it("returns the committed response for a duplicate submission without calling Gemini again", async () => {
@@ -144,28 +149,33 @@ describe("InterviewService", () => {
     expect(r2.turnId).toBe(2);
   });
 
-  it("replies as soon as the spoken part is ready and commits the evaluation afterwards", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const { service, store, sessionId, start } = await startedInterview({
-      live_turn: async (req: { early?: { onEarly: (reply: unknown) => void } }) => {
-        const { evaluation: _evaluation, ...reply } = liveTurnOutput();
-        req.early?.onEarly(reply);
-        await gate;
-        return liveTurnOutput();
-      },
-    });
+  it("replies without scoring the answer; /evaluate scores it and fills in the next question's metadata", async () => {
+    const { service, store, calls, sessionId, start } = await startedInterview();
     const r1 = await service.respond(answer(sessionId, 1, start.firstQuestion.id, "First answer."));
     expect(r1.answerEvaluation).toBeNull();
     expect(r1.nextQuestion).toBeDefined();
+    expect(calls).not.toContain("live_turn_eval");
     const session = store.get(sessionId);
     expect(session.evaluations).toHaveLength(0);
+    expect(session.currentQuestion!.expectedEvidence).toEqual([]);
 
-    const report = service.finish({ sessionId, transcript: [] });
-    release();
-    await report;
+    const done = await service.evaluate({ sessionId, questionId: start.firstQuestion.id });
+    expect(done.evaluated).toBe(true);
     expect(session.evaluations).toHaveLength(1);
     expect(session.evaluations[0].questionId).toBe(start.firstQuestion.id);
+    expect(session.currentQuestion!.expectedEvidence).toEqual(["Explains lexical scope"]);
+    expect(session.questions[1].followUpTriggers).toEqual(["No example given"]);
+
+    // A repeat is a no-op, not a second Gemini call.
+    expect((await service.evaluate({ sessionId, questionId: start.firstQuestion.id })).evaluated).toBe(false);
+    expect(calls.filter((c) => c === "live_turn_eval")).toHaveLength(1);
+  });
+
+  it("finishes with a report even when an answer was never scored", async () => {
+    const { service, sessionId, start } = await startedInterview();
+    await service.respond(answer(sessionId, 1, start.firstQuestion.id, "First answer."));
+    const report = await service.finish({ sessionId, transcript: [] });
+    expect(report).toBeDefined();
   });
 
   it("stores the answer under its question and never commits a turn the interview ended during", async () => {

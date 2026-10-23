@@ -64,8 +64,6 @@ export interface InterviewSession {
     controller: AbortController;
     promise: Promise<RespondResponse>;
   };
-  /** Answer evaluations still streaming in after their reply was sent; the report waits for them. */
-  pendingEvaluations?: Set<Promise<void>>;
   /** Committed responses by `${turnId}:${questionId}` — replayed for duplicate submissions. */
   responses: Map<string, RespondResponse>;
   reportPromise?: Promise<InterviewReport>;

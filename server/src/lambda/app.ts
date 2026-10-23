@@ -1,6 +1,7 @@
 import type { InterviewService } from "../interview/interviewService.js";
 import {
   analyzeRequestSchema,
+  evaluateRequestSchema,
   finishRequestSchema,
   respondRequestSchema,
   startRequestSchema,
@@ -35,8 +36,6 @@ export interface LambdaAppOptions {
   /** Gemini-call budget for the whole deployment per UTC day; 0 = unlimited. */
   geminiCallsPerDay: number;
   sessionTtlMs: number;
-  /** Longest wait for answer evaluations that finish after the reply. */
-  flushWaitMs: number;
   maxBodyBytes?: number;
   /** Cloud voice. Omit to answer /api/tts with 404. */
   tts?: {
@@ -48,7 +47,7 @@ export interface LambdaAppOptions {
 }
 
 /** Approximate Gemini calls each route spends, for the daily budget. */
-const ROUTE_COST = { analyze: 3, start: 1, respond: 1, finish: 1 } as const;
+const ROUTE_COST = { analyze: 3, start: 1, respond: 1, evaluate: 1, finish: 1 } as const;
 type Route = keyof typeof ROUTE_COST;
 
 const json = (statusCode: number, body: unknown, extra: Record<string, string> = {}): UrlResult => ({
@@ -68,12 +67,15 @@ export function createLambdaApp(opts: LambdaAppOptions) {
 
   async function throttle(ip: string, route: Route) {
     try {
-      const perIp = await db.incrementCounter(`ip#${ip}`, 60, 1);
+      // Both counters are independent writes, so they go out together.
+      const [perIp, day] = await Promise.all([
+        db.incrementCounter(`ip#${ip}`, 60, 1),
+        opts.geminiCallsPerDay > 0 ? db.incrementCounter("gemini-day", 86_400, ROUTE_COST[route]) : undefined,
+      ]);
       if (perIp.total > opts.httpRequestsPerMinutePerIp) {
         throw new AppError("RATE_LIMITED", "Too many requests. Please slow down.", 429, true, perIp.retryAfterSeconds);
       }
-      if (opts.geminiCallsPerDay > 0) {
-        const day = await db.incrementCounter("gemini-day", 86_400, ROUTE_COST[route]);
+      if (day) {
         if (day.total > opts.geminiCallsPerDay) {
           throw new AppError(
             "RATE_LIMITED",
@@ -96,12 +98,14 @@ export function createLambdaApp(opts: LambdaAppOptions) {
     const tts = opts.tts;
     if (!tts) return;
     try {
-      const perIp = await db.incrementCounter(`tts-ip#${ip}`, 60, 1);
+      const [perIp, day] = await Promise.all([
+        db.incrementCounter(`tts-ip#${ip}`, 60, 1),
+        tts.charsPerDay > 0 ? db.incrementCounter("tts-chars-day", 86_400, characters) : undefined,
+      ]);
       if (perIp.total > tts.requestsPerMinutePerIp) {
         throw new AppError("RATE_LIMITED", "Too many requests. Please slow down.", 429, true, perIp.retryAfterSeconds);
       }
-      if (tts.charsPerDay > 0) {
-        const day = await db.incrementCounter("tts-chars-day", 86_400, characters);
+      if (day) {
         if (day.total > tts.charsPerDay) {
           throw new AppError(
             "RATE_LIMITED",
@@ -121,7 +125,6 @@ export function createLambdaApp(opts: LambdaAppOptions) {
   async function persist(sessionId: string, version: number) {
     const session = store.peek(sessionId);
     if (!session) return;
-    await service.flushBackground(sessionId, opts.flushWaitMs);
     await db.save(session, version, opts.sessionTtlMs);
   }
 
@@ -146,6 +149,35 @@ export function createLambdaApp(opts: LambdaAppOptions) {
     }
   }
 
+  /**
+   * Scores an answer without holding the session: the (slow) Gemini call runs
+   * on a read-only copy, then the result is committed to whatever the session
+   * looks like by then, retrying if another request saved in between.
+   */
+  async function evaluate(body: unknown) {
+    const input = evaluateRequestSchema.parse(body);
+    const loaded = await db.load(input.sessionId);
+    if (!loaded) throw new AppError("SESSION_NOT_FOUND", "This interview session no longer exists on the server.", 404);
+    const result = await service.runEvaluation(loaded.session, input.questionId);
+    const reply = { sessionId: input.sessionId, questionId: input.questionId, evaluated: Boolean(result) };
+    if (!result) return reply;
+
+    let current = loaded;
+    for (let attempt = 0; ; attempt++) {
+      service.applyEvaluation(current.session, result);
+      try {
+        await db.save(current.session, current.version, opts.sessionTtlMs);
+        return reply;
+      } catch (err) {
+        const conflict = err instanceof AppError && err.httpStatus === 409;
+        if (!conflict || attempt >= 2) throw err;
+        const fresh = await db.load(input.sessionId);
+        if (!fresh) throw err;
+        current = fresh;
+      }
+    }
+  }
+
   async function dispatch(route: Route, body: unknown): Promise<unknown> {
     switch (route) {
       case "analyze": {
@@ -165,6 +197,8 @@ export function createLambdaApp(opts: LambdaAppOptions) {
         const input = respondRequestSchema.parse(body);
         return withSession(input.sessionId, () => service.respond(input));
       }
+      case "evaluate":
+        return evaluate(body);
       case "finish": {
         const input = finishRequestSchema.parse(body);
         const { report } = await withSession(input.sessionId, async () => ({
@@ -192,7 +226,7 @@ export function createLambdaApp(opts: LambdaAppOptions) {
         return json(200, await speak(opts.tts.synthesize, body));
       }
 
-      const match = /^\/api\/interview\/(analyze|start|respond|finish)$/.exec(path);
+      const match = /^\/api\/interview\/(analyze|start|respond|evaluate|finish)$/.exec(path);
       if (method !== "POST" || !match) throw new AppError("VALIDATION_ERROR", "Not found.", 404);
       const route = match[1] as Route;
 

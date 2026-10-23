@@ -29,7 +29,6 @@ function harness(opts: { charsPerDay?: number; perMinute?: number; synthesize?: 
     httpRequestsPerMinutePerIp: 60,
     geminiCallsPerDay: 0,
     sessionTtlMs: 1000,
-    flushWaitMs: 1000,
     tts: opts.noTts
       ? undefined
       : { synthesize, charsPerDay: opts.charsPerDay ?? 0, requestsPerMinutePerIp: opts.perMinute ?? 60 },

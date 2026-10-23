@@ -34,8 +34,8 @@ async function loadDeepgramKey() {
 }
 
 async function init() {
-  await loadGeminiKey();
-  await loadDeepgramKey();
+  // Independent SSM reads: one round trip of cold-start latency instead of two.
+  await Promise.all([loadGeminiKey(), loadDeepgramKey()]);
   const [{ config, LIMITS }, { generateStructured }, { InterviewService }, { SessionStore }, { DynamoStore }, { createLambdaApp }] =
     await Promise.all([
       import("../config.js"),
@@ -65,7 +65,6 @@ async function init() {
     httpRequestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
     geminiCallsPerDay: config.geminiRequestsPerDay,
     sessionTtlMs: LIMITS.finishedSessionTtlMs,
-    flushWaitMs: LIMITS.requestTimeoutMs * 2,
   });
 }
 
@@ -78,8 +77,22 @@ const VOICE_KEY_RETRY_MS = 30_000;
 /** True when the voice key is configured in SSM but was not loaded (e.g. permission added after this instance started). */
 const voiceKeyMissing = () => Boolean(process.env.DEEPGRAM_API_KEY_PARAMETER) && !process.env.DEEPGRAM_API_KEY;
 
+/** A re-init (to pick up a voice key that was missing) running beside the app that is serving requests. */
+let refreshing: Promise<void> | undefined;
+
 export async function handler(event: UrlEvent): Promise<UrlResult> {
-  if (app && voiceKeyMissing() && Date.now() - initializedAt > VOICE_KEY_RETRY_MS) app = undefined;
+  if (app && !refreshing && voiceKeyMissing() && Date.now() - initializedAt > VOICE_KEY_RETRY_MS) {
+    // Retry in the background so this request does not wait on SSM and the module imports.
+    refreshing = init()
+      .then((created) => {
+        app = Promise.resolve(created);
+      })
+      .catch((err) => console.error("[tts] retrying the voice key failed:", err))
+      .finally(() => {
+        initializedAt = Date.now();
+        refreshing = undefined;
+      });
+  }
   app ??= init().then((created) => {
     initializedAt = Date.now();
     return created;
