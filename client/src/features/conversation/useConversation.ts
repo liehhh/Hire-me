@@ -185,6 +185,12 @@ export function useConversation(options: {
       // The turn stays open so the candidate can type instead.
       setMicError(message);
     },
+    onUtteranceEnd: () => {
+      // The speech engine heard a real pause after words: don't wait out the silence timer.
+      if (machine.state === "candidate_speaking" && finalTranscriptRef.current.trim()) {
+        finishAnswerRef.current("silence");
+      }
+    },
   });
 
   function onCandidateActivity() {
@@ -254,6 +260,8 @@ export function useConversation(options: {
     setInterviewerLine(speech.text);
     pendingSpeechRef.current = speech;
     const token = ++speechTokenRef.current;
+    // The candidate's turn follows this line, so get the voice-input connection ready now.
+    voice.warm?.();
 
     const outcome = await tts.speak(speech.text);
     if (token !== speechTokenRef.current || !machine.is("ai_speaking")) return; // ended meanwhile

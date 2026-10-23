@@ -7,6 +7,7 @@ import type {
   EvaluateResponse,
   FinishRequest,
   FinishResponse,
+  SttTokenResponse,
   RespondRequest,
   RespondResponse,
   StartRequest,
@@ -74,6 +75,8 @@ export const interviewApi = {
   /** Scores an answer already submitted via respond(). Fire-and-forget: nothing the candidate waits on. */
   evaluate: (body: EvaluateRequest, signal?: AbortSignal) => post<EvaluateResponse>("evaluate", body, signal),
   finish: (body: FinishRequest, signal?: AbortSignal) => post<FinishResponse>("finish", body, signal),
+  /** Voice input: a short-lived token for streaming the mic straight to Deepgram. */
+  sttToken: (signal?: AbortSignal) => postTo<SttTokenResponse>("/api/stt/token", {}, signal),
   /** Cloud voice: one sentence in, base64 MP3 out. */
   speech: (body: TtsRequest, signal?: AbortSignal) => postTo<TtsResponse>("/api/tts", body, signal),
 };

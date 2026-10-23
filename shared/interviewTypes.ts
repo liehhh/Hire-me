@@ -434,6 +434,18 @@ export type ApiErrorCode =
 // --- POST /api/tts -----------------------------------------------------------
 // The interviewer's voice: text in, audio out (Deepgram Aura).
 
+// The candidate's voice: the browser streams the mic straight to Deepgram with a
+// short-lived token minted here, so the API key never leaves the server.
+
+export interface SttTokenResponse {
+  /** Temporary credential for Deepgram's live transcription socket. */
+  token: string;
+  /** How long the token can still be used to open a connection. */
+  expiresInSeconds: number;
+  /** Transcription model to request, e.g. "nova-3". */
+  model: string;
+}
+
 export interface TtsRequest {
   /** One sentence or short passage of plain text. */
   text: string;

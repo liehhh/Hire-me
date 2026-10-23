@@ -28,6 +28,11 @@ export const config = {
   deepgramModel: (process.env.DEEPGRAM_MODEL ?? "aura-2-thalia-en").trim(),
   /** Whole-deployment daily cap on characters sent to the voice service. 0 disables the cap. */
   ttsCharsPerDay: intEnv("TTS_CHARS_PER_DAY", 50_000),
+  /** The candidate's voice (Deepgram live transcription, streamed from the browser). Needs the same key. */
+  sttEnabled: (process.env.STT_ENABLED ?? "true").toLowerCase() !== "false",
+  deepgramSttModel: (process.env.DEEPGRAM_STT_MODEL ?? "nova-3").trim(),
+  /** Whole-deployment daily cap on transcription sessions (one per answer). 0 disables the cap. */
+  sttSessionsPerDay: intEnv("STT_SESSIONS_PER_DAY", 3_000),
 };
 
 // Hard limits protecting the Gemini free tier. Every Gemini call and every
@@ -46,8 +51,8 @@ export const LIMITS = {
   analysisMaxOutputTokens: 3_000,
   /** Per-turn JSON (evaluation + next question). The spoken part is capped separately. */
   liveTurnMaxOutputTokens: 1_200,
-  /** The spoken reply alone (summary, acknowledgement, next question): small, so it comes back fast. */
-  liveReplyMaxOutputTokens: 600,
+  /** The spoken reply alone (summary, acknowledgement, next question and its answer key); kept small so it comes back fast. */
+  liveReplyMaxOutputTokens: 1_100,
   /** Spoken text budget — the voice should never be handed a monologue. */
   liveResponseMaxTokens: 300,
   reportMaxOutputTokens: intEnv("REPORT_MAX_OUTPUT_TOKENS", 8_192),

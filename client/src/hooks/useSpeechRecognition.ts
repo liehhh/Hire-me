@@ -39,6 +39,8 @@ export interface RecognitionCallbacks {
   onActivity: () => void;
   /** The mic can't be used at all (permission denied, no device). */
   onFatalError: (message: string) => void;
+  /** The engine heard the speaker really stop (only engines with voice-activity detection report this). */
+  onUtteranceEnd?: () => void;
 }
 
 /** Errors after which restarting is pointless. */

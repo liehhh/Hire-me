@@ -171,6 +171,123 @@ describe("InterviewService", () => {
     expect(calls.filter((c) => c === "live_turn_eval")).toHaveLength(1);
   });
 
+  describe("reference material and rubrics", () => {
+    interface Ref {
+      id: string;
+      criteria: { id: string }[];
+    }
+    /** The reference entries Gemini was shown, read from the prompt like the model would. */
+    const refsIn = (req: { prompt: string }): Ref[] => {
+      const found = /<reference_material>\s*([\s\S]*?)\s*<\/reference_material>/.exec(req.prompt);
+      return found ? (JSON.parse(found[1]) as Ref[]) : [];
+    };
+    const rubricCriterionIds = (req: { prompt: string }): string[] => {
+      const found = /<rubric>\s*([\s\S]*?)\s*<\/rubric>/.exec(req.prompt);
+      return found ? (JSON.parse(found[1]) as { criteria: { id: string }[] }).criteria.map((c) => c.id) : [];
+    };
+    const rubric = (referenceIds: string[], overrides: Record<string, unknown> = {}) => ({
+      referenceIds,
+      codeSnippet: null,
+      expectedAnswerSummary: "UNIQUE-ANSWER-KEY microtasks run before timers.",
+      criteria: [
+        { description: "UNIQUE-CRITERION explains microtasks before timers", adaptedFrom: "js-01-c3" },
+        { description: "Gives the reason in their own words", adaptedFrom: null },
+      ],
+      commonMisconceptions: [],
+      ...overrides,
+    });
+
+    it("keeps the question Gemini wrote, saves a grounded rubric for it, and scores the answer against it", async () => {
+      const ownText = "In your own words, how are a promise callback and a timer callback ordered?";
+      const { service, store, sessionId, start } = await startedInterview({
+        first_question: (req: { prompt: string }) => ({
+          openingText: "Hi, I'm Maya.",
+          question: questionDraft({ text: ownText, rubric: rubric([refsIn(req)[0].id]) }),
+        }),
+        live_turn_eval: (req: { prompt: string }) =>
+          liveTurnEvalOutput({
+            criterionScores: rubricCriterionIds(req).map((criterionId, i) => ({
+              criterionId,
+              points: i === 0 ? 1 : 0.5,
+              evidence: "Candidate said so.",
+              reason: "",
+            })),
+          }),
+      });
+      expect(start.firstQuestion.text).toBe(ownText); // never replaced with the bank's wording
+      const session = store.get(sessionId);
+      const saved = session.rubrics?.[start.firstQuestion.id];
+      expect(saved?.question).toBe(ownText);
+      expect(saved?.sources).toHaveLength(1);
+      expect(saved?.criteria.map((c) => c.id)).toEqual([`${start.firstQuestion.id}-c1`, `${start.firstQuestion.id}-c2`]);
+      // The answer key never goes to the browser.
+      expect(JSON.stringify(start)).not.toContain("UNIQUE-ANSWER-KEY");
+      expect(JSON.stringify(start)).not.toContain("UNIQUE-CRITERION");
+
+      await service.respond(answer(sessionId, 1, start.firstQuestion.id, "An answer."));
+      await service.evaluate({ sessionId, questionId: start.firstQuestion.id });
+      expect(session.evaluations[0].rubric).toMatchObject({ questionScore: 75, coverage: 1 });
+    });
+
+    it("drops a rubric that is not grounded in the reference material it was given", async () => {
+      const { store, sessionId, start } = await startedInterview({
+        first_question: { openingText: "Hi.", question: questionDraft({ rubric: rubric(["pg-01"]) }) },
+      });
+      expect(store.get(sessionId).rubrics?.[start.firstQuestion.id]).toBeUndefined();
+    });
+
+    it("keeps the exact code of a code question, markdown characters included", async () => {
+      const code = "console.log(2 * 3); setTimeout(() => console.log('t'), 0);";
+      const text = `What does this print, and in what order? ${code} Explain why.`;
+      const { service, store, sessionId, start } = await startedInterview({
+        first_question: (req: { prompt: string }) => ({
+          openingText: "Hi.",
+          question: questionDraft({ text, rubric: rubric([refsIn(req)[0].id], { codeSnippet: code }) }),
+        }),
+        live_turn: (req: { prompt: string }) =>
+          liveTurnOutput({
+            nextQuestion: questionDraft({ text: `Now this one: ${code} What happens?`, rubric: rubric([refsIn(req)[0].id], { codeSnippet: code }) }),
+          }),
+      });
+      expect(start.firstQuestion.text).toContain(code); // "*" survives the spoken-text cleanup
+      expect(store.get(sessionId).rubrics?.[start.firstQuestion.id]?.codeSnippet).toBe(code);
+      const next = await service.respond(answer(sessionId, 1, start.firstQuestion.id, "An answer."));
+      expect(next.conversationMessage).toContain(code);
+    });
+
+    it("drops the rubric when the question does not contain the code it was derived from", async () => {
+      const { store, sessionId, start } = await startedInterview({
+        first_question: (req: { prompt: string }) => ({
+          openingText: "Hi.",
+          question: questionDraft({
+            text: "What does the snippet we discussed print?",
+            rubric: rubric([refsIn(req)[0].id], { codeSnippet: "console.log(1 + 1);" }),
+          }),
+        }),
+      });
+      expect(store.get(sessionId).rubrics?.[start.firstQuestion.id]).toBeUndefined();
+    });
+
+    it("grounds a follow-up in the same reference, and stops offering an entry once it was asked", async () => {
+      let askedId = "";
+      const offered: string[][] = [];
+      const { service, sessionId, start } = await startedInterview({
+        first_question: (req: { prompt: string }) => {
+          askedId = refsIn(req)[0].id;
+          return { openingText: "Hi.", question: questionDraft({ rubric: rubric([askedId]) }) };
+        },
+        live_turn: (req: { prompt: string }) => {
+          offered.push(refsIn(req).map((r) => r.id));
+          return liveTurnOutput();
+        },
+      });
+      const r1 = await service.respond(answer(sessionId, 1, start.firstQuestion.id, "First."));
+      await service.respond(answer(sessionId, 2, r1.nextQuestion!.id, "Second."));
+      expect(offered[0]).toContain(askedId); // still available to ground a follow-up on that question
+      expect(offered[1]).not.toContain(askedId); // the next question has moved on
+    });
+  });
+
   it("finishes with a report even when an answer was never scored", async () => {
     const { service, sessionId, start } = await startedInterview();
     await service.respond(answer(sessionId, 1, start.firstQuestion.id, "First answer."));

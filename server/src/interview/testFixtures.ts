@@ -70,6 +70,7 @@ export function questionDraft(overrides: Partial<QuestionDraft> = {}): QuestionD
     followUpTriggers: ["No example given"],
     maxFollowUps: 1,
     isFollowUp: false,
+    rubric: null,
     ...overrides,
   };
 }
@@ -89,6 +90,7 @@ export function liveTurnOutput(overrides: Partial<LiveTurnReply> = {}): LiveTurn
 export function liveTurnEvalOutput(overrides: Partial<LiveTurnEval> = {}): LiveTurnEval {
   return {
     competencyAssessed: "React fundamentals",
+    criterionScores: null,
     nextQuestionDetails: {
       sourceEvidence: "Closures come up in the job description",
       expectedEvidence: ["Explains lexical scope"],

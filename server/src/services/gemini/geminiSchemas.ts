@@ -193,8 +193,35 @@ export const blueprintOutputSchema = z.object({
 
 // --- Questions + live turns ----------------------------------------------------
 
+/**
+ * The answer key for one question, written together with the question and
+ * saved before it is asked. It is grounded in reference material, never sent
+ * to the browser, and is what the candidate's answer is scored against.
+ */
+export const questionRubricSchema = z.object({
+  referenceIds: z
+    .array(z.string())
+    .transform((a) => a.map((s) => s.trim()).filter(Boolean).slice(0, 4))
+    .describe("Ids from <reference_material> this rubric is grounded in"),
+  codeSnippet: text(500)
+    .nullable()
+    .describe(
+      "When the question asks about the output or behaviour of code: that exact code, copied character for character into the question text. null otherwise"
+    ),
+  expectedAnswerSummary: text(500).describe("What a correct answer to THIS question contains (for code, derived by tracing codeSnippet)"),
+  criteria: z
+    .array(
+      z.object({
+        description: text(250).describe("One observable thing a correct answer states or shows"),
+        adaptedFrom: text(60).nullable().describe("Id of the reference criterion this keeps or adapts; null for a new criterion"),
+      })
+    )
+    .transform((a) => a.filter((c) => c.description).slice(0, 6)),
+  commonMisconceptions: list(4, 200),
+});
+
 export const questionDraftSchema = z.object({
-  text: text(500).refine((s) => s.length >= 5, "question text is empty"),
+  text: text(900).refine((s) => s.length >= 5, "question text is empty"),
   stage: z.enum(STAGE_NAMES),
   competency: text(80),
   difficulty,
@@ -204,6 +231,9 @@ export const questionDraftSchema = z.object({
   followUpTriggers: list(5, 200),
   maxFollowUps: z.number().transform((n) => Math.round(clamp(0, 3)(n))),
   isFollowUp: z.boolean(),
+  rubric: questionRubricSchema
+    .nullable()
+    .describe("Answer key for this question, grounded in <reference_material>; null when no reference applies"),
 });
 
 export const firstQuestionOutputSchema = z.object({
@@ -240,6 +270,7 @@ export const replyQuestionSchema = questionDraftSchema.pick({
   source: true,
   maxFollowUps: true,
   isFollowUp: true,
+  rubric: true,
 });
 
 /** Everything the interviewer says next. Kept small: the candidate waits for this call. */
@@ -258,6 +289,21 @@ export const liveTurnReplySchema = z.object({
 export const liveTurnEvalSchema = z.object({
   competencyAssessed: text(80).describe("Which blueprint competency this answer gave evidence for"),
   evaluation: answerEvaluationSchema,
+  criterionScores: z
+    .array(
+      z.object({
+        criterionId: text(60),
+        points: z
+          .number()
+          .nullable()
+          .describe("Share of the criterion the answer earned: 0, 0.5 or 1. null = not assessed"),
+        evidence: text(300).describe("What the candidate said that supports the score, or that the point was not covered"),
+        reason: text(300),
+      })
+    )
+    .transform((a) => a.slice(0, 12))
+    .nullable()
+    .describe("One entry per rubric criterion when a rubric is given; null when there is no rubric"),
   nextQuestionDetails: z
     .object({
       sourceEvidence: text(300).describe("The requirement, CV claim or prior answer the next question tests"),
@@ -326,6 +372,7 @@ export type JobAnalysisOutput = z.output<typeof jobAnalysisOutputSchema>;
 export type CandidateAnalysisOutput = z.output<typeof candidateAnalysisOutputSchema>;
 export type BlueprintOutput = z.output<typeof blueprintOutputSchema>;
 export type QuestionDraft = z.output<typeof questionDraftSchema>;
+export type QuestionRubricDraft = z.output<typeof questionRubricSchema>;
 export type FirstQuestionOutput = z.output<typeof firstQuestionOutputSchema>;
 export type LiveTurnReply = z.output<typeof liveTurnReplySchema>;
 export type LiveTurnEval = z.output<typeof liveTurnEvalSchema>;

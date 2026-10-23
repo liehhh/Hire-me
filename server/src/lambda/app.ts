@@ -10,6 +10,7 @@ import type { SessionStore } from "../interview/session.js";
 import type { DynamoStore } from "../persistence/dynamoStore.js";
 import { errorBody, toAppError } from "../routes/apiErrors.js";
 import { AppError } from "../services/gemini/geminiErrors.js";
+import { issueSttToken, type SttTokenIssuer } from "../services/stt/sttService.js";
 import { speak, ttsRequestSchema, type SpeechSynthesizer } from "../services/tts/ttsService.js";
 
 /** The subset of a Lambda Function URL (payload v2) event this app reads. */
@@ -37,6 +38,14 @@ export interface LambdaAppOptions {
   geminiCallsPerDay: number;
   sessionTtlMs: number;
   maxBodyBytes?: number;
+  /** Live transcription for the candidate's voice. Omit to answer /api/stt/token with 404. */
+  stt?: {
+    issue: SttTokenIssuer;
+    model: string;
+    /** Transcription sessions per UTC day for the whole deployment; 0 = unlimited. */
+    sessionsPerDay: number;
+    requestsPerMinutePerIp: number;
+  };
   /** Cloud voice. Omit to answer /api/tts with 404. */
   tts?: {
     synthesize: SpeechSynthesizer;
@@ -119,6 +128,33 @@ export function createLambdaApp(opts: LambdaAppOptions) {
     } catch (err) {
       if (err instanceof AppError) throw err;
       console.warn("[rate-limit] tts counter unavailable, allowing request:", err);
+    }
+  }
+
+  /** Per-IP request rate plus a whole-deployment daily budget of transcription sessions (billed per minute streamed). */
+  async function throttleStt(ip: string) {
+    const stt = opts.stt;
+    if (!stt) return;
+    try {
+      const [perIp, day] = await Promise.all([
+        db.incrementCounter(`stt-ip#${ip}`, 60, 1),
+        stt.sessionsPerDay > 0 ? db.incrementCounter("stt-day", 86_400, 1) : undefined,
+      ]);
+      if (perIp.total > stt.requestsPerMinutePerIp) {
+        throw new AppError("RATE_LIMITED", "Too many requests. Please slow down.", 429, true, perIp.retryAfterSeconds);
+      }
+      if (day && day.total > stt.sessionsPerDay) {
+        throw new AppError(
+          "RATE_LIMITED",
+          "The daily voice-input budget for this app is used up. Type your answer or try again tomorrow.",
+          429,
+          false,
+          day.retryAfterSeconds
+        );
+      }
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.warn("[rate-limit] stt counter unavailable, allowing request:", err);
     }
   }
 
@@ -215,6 +251,12 @@ export function createLambdaApp(opts: LambdaAppOptions) {
     const path = event.rawPath.replace(/\/+$/, "");
     try {
       if (method === "GET" && path === "/api/health") return json(200, { ok: true, model: opts.model });
+
+      if (method === "POST" && path === "/api/stt/token") {
+        if (!opts.stt) throw new AppError("VALIDATION_ERROR", "Not found.", 404);
+        await throttleStt(sourceIp ?? "unknown");
+        return json(200, await issueSttToken(opts.stt.issue, opts.stt.model));
+      }
 
       if (method === "POST" && path === "/api/tts") {
         if (!opts.tts) throw new AppError("VALIDATION_ERROR", "Not found.", 404);

@@ -25,6 +25,11 @@ Parameters:
     Default: 50000
     MinValue: 0
     Description: Whole-deployment daily cap on characters sent to the voice service (an interview speaks roughly 3-12K). 0 disables the cap.
+  SttSessionsPerDay:
+    Type: Number
+    Default: 3000
+    MinValue: 0
+    Description: Whole-deployment daily cap on voice-input sessions (one per spoken answer; each streams audio to Deepgram). 0 disables the cap.
   DeepgramApiKeyParameter:
     Type: String
     Default: /interviewerai/deepgram-api-key
@@ -82,6 +87,7 @@ Resources:
           GEMINI_MODEL: !Ref GeminiModel
           GEMINI_RPD: !Ref GeminiCallsPerDay
           TTS_CHARS_PER_DAY: !Ref TtsCharsPerDay
+          STT_SESSIONS_PER_DAY: !Ref SttSessionsPerDay
           DEEPGRAM_API_KEY_PARAMETER: !Ref DeepgramApiKeyParameter
           DEEPGRAM_MODEL: !Ref DeepgramModel
           NODE_OPTIONS: --enable-source-maps

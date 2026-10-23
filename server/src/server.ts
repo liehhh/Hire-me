@@ -7,6 +7,7 @@ import { errorHandler, interviewRouter } from "./routes/interview.js";
 import { generateStructured, verifyGeminiModel } from "./services/gemini/geminiClient.js";
 import { ipRateLimit } from "./services/rateLimiter.js";
 import { createDeepgramSynthesizer, speak } from "./services/tts/ttsService.js";
+import { createDeepgramTokenIssuer, issueSttToken } from "./services/stt/sttService.js";
 
 // React -> this server -> Gemini. The browser never sees the Gemini key or
 // prompts; it only receives validated, structured results.
@@ -55,6 +56,15 @@ async function main() {
     const synthesize = createDeepgramSynthesizer({ apiKey: config.deepgramApiKey, model: config.deepgramModel });
     app.post("/api/tts", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), (req, res, next) => {
       speak(synthesize, req.body)
+        .then((body) => res.json(body))
+        .catch(next);
+    });
+  }
+  // The candidate's voice: the browser streams to Deepgram with a short-lived token from here.
+  if (config.sttEnabled && config.deepgramApiKey) {
+    const issue = createDeepgramTokenIssuer({ apiKey: config.deepgramApiKey });
+    app.post("/api/stt/token", ipRateLimit(LIMITS.httpRequestsPerMinutePerIp), (_req, res, next) => {
+      issueSttToken(issue, config.deepgramSttModel)
         .then((body) => res.json(body))
         .catch(next);
     });

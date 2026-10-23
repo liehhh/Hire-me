@@ -13,6 +13,7 @@ import type {
   TranscriptTurn,
 } from "../../../shared/interviewTypes.js";
 import { LIMITS } from "../config.js";
+import type { RubricResult, RubricSnapshot } from "../knowledge/rubric.js";
 import { AppError } from "../services/gemini/geminiErrors.js";
 
 export interface EvaluatedAnswer {
@@ -20,6 +21,8 @@ export interface EvaluatedAnswer {
   competency: string;
   answerTurnId: string;
   evaluation: AnswerEvaluation;
+  /** Score against the question-bank rubric, when the question came from the bank. */
+  rubric?: RubricResult;
 }
 
 /**
@@ -39,6 +42,11 @@ export interface InterviewSession {
   transcript: TranscriptTurn[];
   questions: InterviewQuestion[];
   evaluations: EvaluatedAnswer[];
+  /**
+   * Question-bank rubrics by question id, saved when the question was asked.
+   * Server-side only: the answer criteria must never reach the browser.
+   */
+  rubrics?: Record<string, RubricSnapshot>;
   ledger: EvidenceLedgerItem[];
   currentStage: string;
   currentQuestion?: InterviewQuestion;

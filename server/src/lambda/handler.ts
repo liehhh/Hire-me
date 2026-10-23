@@ -2,6 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import type { UrlEvent, UrlResult } from "./app.js";
+import { createDeepgramTokenIssuer } from "../services/stt/sttService.js";
 import { createDeepgramSynthesizer } from "../services/tts/ttsService.js";
 
 // Entry point for AWS Lambda (Function URL). The Gemini key lives in SSM
@@ -58,6 +59,15 @@ async function init() {
           requestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
         }
       : undefined,
+    stt:
+      config.sttEnabled && process.env.DEEPGRAM_API_KEY
+        ? {
+            issue: createDeepgramTokenIssuer({ apiKey: process.env.DEEPGRAM_API_KEY }),
+            model: config.deepgramSttModel,
+            sessionsPerDay: config.sttSessionsPerDay,
+            requestsPerMinutePerIp: LIMITS.httpRequestsPerMinutePerIp,
+          }
+        : undefined,
     service: new InterviewService(generateStructured, store),
     store,
     db: new DynamoStore(DynamoDBDocumentClient.from(new DynamoDBClient({})), process.env.TABLE_NAME ?? "InterviewerAI"),

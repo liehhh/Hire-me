@@ -14,8 +14,11 @@ import type {
   TranscriptTurn,
 } from "../../../shared/interviewTypes.js";
 import { LIMITS, MAX_SPOKEN_CHARACTERS } from "../config.js";
+import { bankEntry, retrieveEntries, sourceOf, type BankEntry } from "../knowledge/questionBank.js";
+import { scoreRubric, type RubricResult, type RubricSnapshot } from "../knowledge/rubric.js";
 import type { GenerateStructured } from "../services/gemini/geminiClient.js";
 import { AppError } from "../services/gemini/geminiErrors.js";
+import type { PromptReference } from "../services/gemini/geminiPrompts.js";
 import {
   candidateAnalysisPrompt,
   finalReportPrompt,
@@ -58,9 +61,38 @@ type StartInput = z.output<typeof startRequestSchema>;
 /** A drafted question; the metadata fields are absent when it came from the fast reply call. */
 type QuestionInput = z.output<typeof replyQuestionSchema> & Partial<z.output<typeof questionDraftSchema>>;
 
+/** What the report sees for one answer: the 0-5 evaluation plus the rubric result, if there is one. */
+function reportEvaluation(scored: InterviewSession["evaluations"][number] | undefined): unknown {
+  if (!scored) return "not evaluated (interview ended)";
+  if (!scored.rubric) return scored.evaluation;
+  const { sources, questionScore, coverage, criteria } = scored.rubric;
+  return {
+    ...scored.evaluation,
+    rubric: {
+      sources,
+      questionScore,
+      coverage,
+      criteria: criteria.map((c) => ({ id: c.criterionId, points: c.points, of: c.maxPoints, evidence: c.evidence })),
+    },
+  };
+}
+
+const toPromptReference = (entry: BankEntry): PromptReference => ({
+  id: entry.id,
+  competency: entry.competency,
+  level: entry.level,
+  question: entry.question,
+  expectedAnswerSummary: entry.expected_answer_summary,
+  criteria: entry.criteria.map((c) => ({ id: c.id, description: c.description })),
+  commonMisconceptions: entry.common_misconceptions,
+  followUpQuestions: entry.follow_up_questions,
+});
+
 /** A scored answer waiting to be committed to the session. */
 export interface EvaluationResult {
   questionId: string;
+  /** Rubric score, computed from the model's per-criterion results, when the question came from the bank. */
+  rubric?: RubricResult;
   answerTurnId: string;
   /** The question asked after this answer, whose metadata the evaluation fills in. */
   nextQuestionId?: string;
@@ -89,11 +121,29 @@ const ANALYSIS_TIMEOUT_MS = Math.max(LIMITS.requestTimeoutMs, 30_000);
 
 /** Joins spoken parts and keeps the result short enough to speak. */
 function spoken(...parts: (string | null | undefined)[]): string {
-  const clean = parts.map((p) => (p ?? "").replace(/[*_#`>]/g, "").trim()).filter(Boolean);
+  return joinSpoken(parts, MAX_SPOKEN_CHARACTERS);
+}
+
+function joinSpoken(parts: (string | null | undefined)[], limit: number): string {
+  const clean = parts.map((p) => (p ?? "").replace(/[*#`]/g, "").trim()).filter(Boolean);
   let text = clean.join(" ");
   // Drop the acknowledgement before ever truncating the question itself.
-  if (text.length > MAX_SPOKEN_CHARACTERS && clean.length > 1) text = clean.slice(1).join(" ");
-  return truncate(text, MAX_SPOKEN_CHARACTERS);
+  if (text.length > limit && clean.length > 1) text = clean.slice(1).join(" ");
+  return truncate(text, limit);
+}
+
+const CODE_MARK = "\u0001CODE\u0001";
+
+/**
+ * Like `spoken`, but the code a question is about is never touched: markdown
+ * is stripped and the text is shortened around it, not through it, so the
+ * candidate sees exactly the code the rubric was written for.
+ */
+function spokenKeeping(code: string | undefined, ...parts: (string | null | undefined)[]): string {
+  if (!code) return spoken(...parts);
+  const marked = parts.map((p) => (p ?? "").split(code).join(CODE_MARK));
+  const limit = Math.max(MAX_SPOKEN_CHARACTERS - code.length + CODE_MARK.length, 200);
+  return joinSpoken(marked, limit).split(CODE_MARK).join(code);
 }
 
 export class InterviewService {
@@ -268,8 +318,62 @@ export class InterviewService {
     return session;
   }
 
+  /**
+   * Reference material for the next question: the bank entries that fit the
+   * job and are still unasked, plus the entries behind the current question
+   * (a follow-up is grounded in the same material). Empty for jobs the bank
+   * does not cover.
+   */
+  private referencesFor(session: InterviewSession, priorityCompetencies: string[], currentQuestionId?: string): BankEntry[] {
+    const asked = Object.values(session.rubrics ?? {}).flatMap((r) => r.sources.map((src) => src.id));
+    const retrieved = retrieveEntries({
+      job: session.jobProfile,
+      competencies: session.blueprint.competencyWeights.map((c) => c.competency),
+      priorityCompetencies,
+      excludeIds: asked,
+    }).map((r) => r.entry);
+    const current = (currentQuestionId ? session.rubrics?.[currentQuestionId]?.sources ?? [] : [])
+      .map((src) => bankEntry(src.id))
+      .filter((e): e is BankEntry => e !== undefined);
+    return [...current, ...retrieved.filter((e) => !current.some((c) => c.id === e.id))];
+  }
+
+  /**
+   * Saves the answer key Gemini wrote for the question it is about to ask.
+   * It is only kept when it is grounded in reference material that was
+   * actually provided, and, for a code question, when the question contains
+   * the exact code the key was derived from. Otherwise the question is asked
+   * without a rubric and is scored on the general 0-5 dimensions only.
+   */
+  private saveRubric(session: InterviewSession, question: InterviewQuestion, draft: QuestionInput, provided: BankEntry[]) {
+    const rubric = draft.rubric;
+    if (!rubric) return;
+    const sources = provided.filter((e) => rubric.referenceIds.includes(e.id));
+    if (sources.length === 0 || rubric.criteria.length === 0) {
+      console.warn("[interview] dropping a rubric that is not grounded in the reference material provided");
+      return;
+    }
+    const code = rubric.codeSnippet || undefined;
+    if (code && !question.text.includes(code)) {
+      console.warn("[interview] dropping a rubric whose code is not in the question text");
+      return;
+    }
+    const snapshot: RubricSnapshot = {
+      sources: sources.map(sourceOf),
+      competency: question.competency,
+      question: question.text,
+      codeSnippet: code,
+      expectedAnswerSummary: rubric.expectedAnswerSummary,
+      // Criterion ids are ours, not the model's, so scores can only refer to criteria that exist.
+      criteria: rubric.criteria.map((c, i) => ({ id: `${question.id}-c${i + 1}`, description: c.description, maxPoints: 1 })),
+      commonMisconceptions: rubric.commonMisconceptions,
+    };
+    (session.rubrics ??= {})[question.id] = snapshot;
+  }
+
   private async runStart(session: InterviewSession): Promise<StartResponse> {
     chargeGeminiCall(session);
+    const references = this.referencesFor(session, session.blueprint.competencyWeights.filter((c) => c.critical).map((c) => c.competency));
     const out = await this.generate({
       task: "first_question",
       ...firstQuestionPrompt({
@@ -277,6 +381,7 @@ export class InterviewService {
         candidate: session.candidateProfile,
         blueprint: session.blueprint,
         persona: session.persona,
+        references: references.map(toPromptReference),
       }),
       schema: firstQuestionOutputSchema,
       maxOutputTokens: LIMITS.liveTurnMaxOutputTokens,
@@ -284,6 +389,7 @@ export class InterviewService {
     });
 
     const question = this.toQuestion(session, out.question, false);
+    this.saveRubric(session, question, out.question, references);
     session.status = "active";
     session.startedAt = this.iso();
     session.currentQuestion = question;
@@ -380,6 +486,9 @@ export class InterviewService {
     const stageIndex = session.blueprint.stages.findIndex((s) => s.name === session.currentStage);
     const previousQuestions = session.questions.map((q) => q.text);
 
+    const references = this.referencesFor(session, pace.uncovered, question.id);
+    const currentRubric = session.rubrics?.[question.id];
+
     const checkReply = (o: LiveTurnReply) => {
       const ending = pace.mustEnd || (pace.mayEnd && o.endInterview);
       if (!ending && !o.nextQuestion) return "no next question while the interview must continue";
@@ -427,6 +536,11 @@ export class InterviewService {
         elapsedMinutes: Math.round(pace.elapsed),
         plannedMinutes: pace.planned,
         estimatedQuestionsRemaining: Math.max(0, session.blueprint.totalQuestions - session.questionCount),
+        references: references.map(toPromptReference),
+        currentReference: currentRubric && {
+          expectedAnswerSummary: currentRubric.expectedAnswerSummary,
+          commonMisconceptions: currentRubric.commonMisconceptions,
+        },
       }),
       schema: liveTurnReplySchema,
       maxOutputTokens: LIMITS.liveReplyMaxOutputTokens,
@@ -459,12 +573,13 @@ export class InterviewService {
         nextAction = "move_to_next_competency";
       }
       nextQuestion = this.toQuestion(session, out.nextQuestion!, isFollowUp);
+      this.saveRubric(session, nextQuestion, out.nextQuestion!, references);
       session.followUpsUsed = isFollowUp ? session.followUpsUsed + 1 : 0;
       session.currentQuestion = nextQuestion;
       session.currentStage = nextQuestion.stage;
       session.questions.push(nextQuestion);
       session.questionCount++;
-      conversationMessage = spoken(out.acknowledgement, nextQuestion.text);
+      conversationMessage = spokenKeeping(session.rubrics?.[nextQuestion.id]?.codeSnippet, out.acknowledgement, nextQuestion.text);
     }
 
     // The turn advances only now, after a valid Gemini response was committed.
@@ -519,6 +634,7 @@ export class InterviewService {
     const question = session.questions[index];
     const answerTurn = session.transcript[answerIndex];
     const next = session.questions[index + 1];
+    const rubric = session.rubrics?.[questionId];
     const output = await this.generate({
       task: "live_turn_eval",
       ...liveTurnEvalPrompt({
@@ -532,13 +648,20 @@ export class InterviewService {
           .slice(Math.max(0, answerIndex - 4), answerIndex)
           .map((t) => ({ speaker: t.speaker, text: truncate(t.text, 600) })),
         nextQuestionText: next?.text ?? null,
+        rubric,
       }),
       schema: liveTurnEvalSchema,
       maxOutputTokens: LIMITS.liveTurnMaxOutputTokens,
       temperature: 0.2,
       thinking: "low",
     });
-    return { questionId, answerTurnId: answerTurn.id, nextQuestionId: next?.id, output };
+    return {
+      questionId,
+      answerTurnId: answerTurn.id,
+      nextQuestionId: next?.id,
+      output,
+      rubric: rubric && scoreRubric(rubric, output.criterionScores),
+    };
   }
 
   /** Commits a finished evaluation. Idempotent per question, so a save retry can re-apply it to a fresh copy. */
@@ -552,6 +675,7 @@ export class InterviewService {
       competency,
       answerTurnId: result.answerTurnId,
       evaluation: output.evaluation,
+      rubric: result.rubric,
     });
     updateLedger(session, competency, output.evaluation, result.answerTurnId);
     if (output.evaluation.relevance >= 2 && !session.competenciesCovered.includes(competency)) {
@@ -633,7 +757,7 @@ export class InterviewService {
       question: a.question,
       competency: a.competency,
       answer: truncate(a.answer, perAnswer),
-      evaluation: session.evaluations.find((e) => e.questionId === a.questionId)?.evaluation ?? "not evaluated (interview ended)",
+      evaluation: reportEvaluation(session.evaluations.find((e) => e.questionId === a.questionId)),
     }));
 
     chargeGeminiCall(session, false);
@@ -666,7 +790,7 @@ export class InterviewService {
     const knownStage = session.blueprint.stages.some((s) => s.name === draft.stage);
     return {
       id: randomUUID(),
-      text: spoken(draft.text),
+      text: spokenKeeping(draft.rubric?.codeSnippet || undefined, draft.text),
       stage: knownStage ? draft.stage : session.currentStage,
       competency: matchCompetency(draft.competency, session.blueprint.competencyWeights) ?? draft.competency,
       difficulty: Math.min(maximum, Math.max(Math.max(1, baseline - 1), draft.difficulty)),
