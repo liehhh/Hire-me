@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "lucide-react": "^1.57.0",
+    "mammoth": "^1.13.0",
     "next": "^16.4.0",
+    "pdfjs-dist": "^6.5.438",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

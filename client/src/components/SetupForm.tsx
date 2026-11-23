@@ -4,16 +4,41 @@ import { useRef, useState } from "react";
 import { ArrowRight, FileUp, Loader2 } from "lucide-react";
 import { interviewApi, ApiRequestError } from "../api/interviewApi";
 import { prefetchStart } from "../api/startInterview";
-import type { AnalyzeRequest, AnalyzeResponse, InterviewMode, PreferredLength } from "../types";
+import type {
+  AnalyzeRequest,
+  AnalyzeResponse,
+  InterviewMode,
+  PreferredLength,
+} from "../types";
+import * as pdfjsLib from "pdfjs-dist";
+import mammoth from "mammoth";
 
 const MIN_JD_CHARS = 50;
 const MAX_TEXT_CHARS = 30_000;
 
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//://cloudflare.com{pdfjsLib.version}/pdf.worker.min.js`;
+
 const MODES: { value: InterviewMode; label: string; hint: string }[] = [
-  { value: "mixed", label: "Mixed", hint: "Technical + behavioral, like a full loop" },
-  { value: "technical", label: "Technical", hint: "Skills, depth and trade-offs" },
-  { value: "behavioral", label: "Behavioral", hint: "Ownership, collaboration, judgment" },
-  { value: "screening", label: "Screening", hint: "Recruiter-style fit and motivation" },
+  {
+    value: "mixed",
+    label: "Mixed",
+    hint: "Technical + behavioral, like a full loop",
+  },
+  {
+    value: "technical",
+    label: "Technical",
+    hint: "Skills, depth and trade-offs",
+  },
+  {
+    value: "behavioral",
+    label: "Behavioral",
+    hint: "Ownership, collaboration, judgment",
+  },
+  {
+    value: "screening",
+    label: "Screening",
+    hint: "Recruiter-style fit and motivation",
+  },
 ];
 
 const LENGTHS: { value: PreferredLength; label: string }[] = [
@@ -32,7 +57,8 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
   const [targetRole, setTargetRole] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [interviewMode, setInterviewMode] = useState<InterviewMode>("mixed");
-  const [preferredLength, setPreferredLength] = useState<PreferredLength>("standard");
+  const [preferredLength, setPreferredLength] =
+    useState<PreferredLength>("standard");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -41,13 +67,65 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
 
   const handleResumeFile = async (file: File | undefined) => {
     if (!file) return;
-    if (!/\.(txt|md|text)$/i.test(file.name) && !file.type.startsWith("text/")) {
-      setError("Upload a plain-text resume (.txt or .md), or paste its text below.");
-      return;
-    }
-    const text = await file.text();
-    setResume(text.slice(0, MAX_TEXT_CHARS));
+
+    const fileName = file.name.toLowerCase();
+    let extractedText = "";
+
+    setIsLoading(true);
     setError(null);
+
+    try {
+      // 1. Plain Text & Markdown
+      if (/\.(txt|md|text)$/i.test(fileName) || file.type.startsWith("text/")) {
+        extractedText = await file.text();
+      }
+
+      // 2. PDF Files
+      else if (fileName.endsWith(".pdf") || file.type === "application/pdf") {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let fullText = "";
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items
+            .map((item: any) => item.str)
+            .join(" ");
+          fullText += pageText + "\n";
+        }
+        extractedText = fullText;
+      }
+
+      // 3. Word Files (.docx)
+      else if (
+        fileName.endsWith(".docx") ||
+        file.type ===
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ) {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        extractedText = result.value;
+      }
+
+      // 4. Unsupported Format
+      else {
+        setError(
+          "Upload a valid resume (.txt, .md, .pdf, or .docx), or paste its text below."
+        );
+        setIsLoading(false);
+        return;
+      }
+
+      setResume(extractedText.slice(0, MAX_TEXT_CHARS));
+    } catch (err) {
+      console.error("File extraction error:", err);
+      setError(
+        "Failed to extract text from this document. Please try pasting it directly."
+      );
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -56,7 +134,9 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
     setError(null);
 
     if (jobDescription.trim().length < MIN_JD_CHARS) {
-      setError("Paste the full job description — responsibilities and requirements — so the interview can be tailored.");
+      setError(
+        "Paste the full job description — responsibilities and requirements — so the interview can be tailored."
+      );
       return;
     }
 
@@ -77,10 +157,15 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
       prefetchStart(analysis);
       onAnalyzed(analysis);
     } catch (err) {
-      const message = err instanceof ApiRequestError ? err.message : "Something went wrong.";
+      const message =
+        err instanceof ApiRequestError ? err.message : "Something went wrong.";
       const wait =
         err instanceof ApiRequestError && err.retryAfterSeconds
-          ? ` (try again in about ${Math.ceil(err.retryAfterSeconds / 60) > 1 ? `${Math.ceil(err.retryAfterSeconds / 60)} minutes` : `${err.retryAfterSeconds} seconds`})`
+          ? ` (try again in about ${
+              Math.ceil(err.retryAfterSeconds / 60) > 1
+                ? `${Math.ceil(err.retryAfterSeconds / 60)} minutes`
+                : `${err.retryAfterSeconds} seconds`
+            })`
           : "";
       setError(message + wait);
     } finally {
@@ -100,16 +185,22 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
         <h1 className="display animate-rise">
           Practice
           <br />
-          <span className="bg-gradient-to-b from-[#1d1d1f] to-[#9a9aa0] bg-clip-text text-transparent">the real thing.</span>
+          <span className="bg-gradient-to-b from-[#1d1d1f] to-[#9a9aa0] bg-clip-text text-transparent">
+            the real thing.
+          </span>
         </h1>
         <p className="animate-rise mt-10 max-w-2xl text-2xl font-medium leading-snug tracking-tight text-mute [animation-delay:120ms] sm:text-[28px]">
-          An interview planned for the exact role. A report built only from what you actually said.
+          An interview planned for the exact role. A report built only from what
+          you actually said.
         </p>
       </section>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-16">
         <div>
-          <label htmlFor="jd" className="mb-4 block text-3xl font-semibold tracking-tight">
+          <label
+            htmlFor="jd"
+            className="mb-4 block text-3xl font-semibold tracking-tight"
+          >
             The role.
           </label>
           <textarea
@@ -123,7 +214,10 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
           />
           <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <label htmlFor="role" className="mb-2 block px-1 text-sm font-medium text-mute">
+              <label
+                htmlFor="role"
+                className="mb-2 block px-1 text-sm font-medium text-mute"
+              >
                 Target role
               </label>
               <input
@@ -136,7 +230,10 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
               />
             </div>
             <div>
-              <label htmlFor="company" className="mb-2 block px-1 text-sm font-medium text-mute">
+              <label
+                htmlFor="company"
+                className="mb-2 block px-1 text-sm font-medium text-mute"
+              >
                 Company
               </label>
               <input
@@ -153,7 +250,10 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
 
         <div>
           <div className="mb-4 flex items-baseline justify-between gap-4">
-            <label htmlFor="resume" className="text-3xl font-semibold tracking-tight">
+            <label
+              htmlFor="resume"
+              className="text-3xl font-semibold tracking-tight"
+            >
               You. <span className="font-normal text-mute">Optional.</span>
             </label>
             <button
@@ -161,12 +261,13 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
               onClick={() => fileInputRef.current?.click()}
               className="flex items-center gap-1.5 text-[15px] font-medium text-accent hover:underline"
             >
-              <FileUp className="h-4 w-4" /> Upload .txt / .md
+              <FileUp className="h-4 w-4" /> Upload resume (.pdf, .docx, .txt,
+              .md)
             </button>
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.text,text/plain,text/markdown"
+              accept=".txt,.md,.text,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               className="hidden"
               onChange={(e) => void handleResumeFile(e.target.files?.[0])}
             />
@@ -183,7 +284,9 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
         </div>
 
         <fieldset>
-          <legend className="mb-4 text-3xl font-semibold tracking-tight">The format.</legend>
+          <legend className="mb-4 text-3xl font-semibold tracking-tight">
+            The format.
+          </legend>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {MODES.map((m) => {
               const active = interviewMode === m.value;
@@ -194,11 +297,21 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
                   onClick={() => setInterviewMode(m.value)}
                   aria-pressed={active}
                   className={`rounded-3xl p-5 text-left shadow-card transition ${
-                    active ? "bg-ink text-white" : "bg-white text-ink hover:bg-white/60"
+                    active
+                      ? "bg-ink text-white"
+                      : "bg-white text-ink hover:bg-white/60"
                   }`}
                 >
-                  <span className="block text-lg font-semibold tracking-tight">{m.label}</span>
-                  <span className={`mt-1 block text-sm leading-snug ${active ? "text-white/60" : "text-mute"}`}>{m.hint}</span>
+                  <span className="block text-lg font-semibold tracking-tight">
+                    {m.label}
+                  </span>
+                  <span
+                    className={`mt-1 block text-sm leading-snug ${
+                      active ? "text-white/60" : "text-mute"
+                    }`}
+                  >
+                    {m.hint}
+                  </span>
                 </button>
               );
             })}
@@ -212,14 +325,19 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
                 onClick={() => setPreferredLength(l.value)}
                 aria-pressed={preferredLength === l.value}
                 className={`rounded-full px-6 py-2 text-[15px] font-medium transition ${
-                  preferredLength === l.value ? "bg-white text-ink shadow-card" : "text-mute hover:text-ink"
+                  preferredLength === l.value
+                    ? "bg-white text-ink shadow-card"
+                    : "text-mute hover:text-ink"
                 }`}
               >
                 {l.label}
               </button>
             ))}
           </div>
-          <p className="mt-3 px-1 text-sm text-mute">Actual duration is set by the role's seniority, like a real interview.</p>
+          <p className="mt-3 px-1 text-sm text-mute">
+            Actual duration is set by the role's seniority, like a real
+            interview.
+          </p>
         </fieldset>
 
         {error && (
@@ -229,7 +347,11 @@ export function SetupForm({ onAnalyzed }: SetupFormProps) {
         )}
 
         <div>
-          <button type="submit" disabled={isLoading} className="btn-primary !px-10 !py-5 !text-xl">
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="btn-primary !px-10 !py-5 !text-xl"
+          >
             {isLoading ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin" />

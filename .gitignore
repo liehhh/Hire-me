@@ -9,6 +9,7 @@ npm-debug.log*
 server/dist/
 client/dist/
 client/.next/
+client/out/
 next-env.d.ts
 server/lambda-dist/
 server/.aws-sam/
